@@ -144,7 +144,7 @@ class ActionProposal(BaseModel):
     action_type: str
     payload: Any
     risk_level: RiskLevel
-    dedupe_key: str
+    dedupe_key: Optional[str] = None
     context: Any
     status: ActionStatus
     created_at: datetime
@@ -153,6 +153,41 @@ class ActionProposal(BaseModel):
     decision_reason: Optional[str]
     expires_at: datetime
     execution_result: Optional[Any] = None
+
+
+class StepStatus(str, Enum):
+    queued = "queued"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class PipelineStatus(str, Enum):
+    queued = "queued"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+
+    # WaitingApproval is represented as {"waiting_approval": "<step_id>"} in some clients;
+    # the REST API returns a tagged enum; keep the model permissive by allowing raw strings.
+
+
+class StepResult(BaseModel):
+    step_id: str
+    status: StepStatus
+    output: Optional[Any] = None
+    error: Optional[str] = None
+    duration_ms: int
+
+
+class PipelineRun(BaseModel):
+    id: str
+    pipeline_id: str
+    status: Any
+    step_results: Dict[str, StepResult]
+    started_at: datetime
+    completed_at: Optional[datetime] = None
 
 
 class MemoryType(str, Enum):

@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS horizons_action_proposals (
   review_mode TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   context_json TEXT NOT NULL,
-  dedupe_key TEXT NOT NULL,
+  dedupe_key TEXT NULL,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
@@ -38,7 +38,11 @@ CREATE TABLE IF NOT EXISTS horizons_action_proposals (
   decision_reason TEXT NULL,
   execution_result_json TEXT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS hap_org_dedupe_key ON horizons_action_proposals (org_id, dedupe_key);
+-- NOTE: SQLite's `ON CONFLICT(col, ...)` only matches *non-partial* UNIQUE constraints/indexes.
+-- A plain UNIQUE index allows multiple NULLs anyway, so we don't need a partial index here.
+DROP INDEX IF EXISTS hap_org_dedupe_key;
+CREATE UNIQUE INDEX IF NOT EXISTS hap_org_dedupe_key
+  ON horizons_action_proposals (org_id, dedupe_key);
 CREATE INDEX IF NOT EXISTS hap_org_status_created_at ON horizons_action_proposals (org_id, status, created_at);
 "#;
 
@@ -99,8 +103,18 @@ impl CoreAgentsExecutor {
         handle: &ProjectDbHandle,
         proposal: &ActionProposal,
         review_mode: ReviewMode,
-    ) -> Result<()> {
+    ) -> Result<(ActionProposal, ReviewMode, bool)> {
         self.ensure_schema(org_id, handle).await?;
+
+        // If the caller didn't provide an idempotency key, generate one so we can still
+        // store + query the row consistently. This keeps "no dedupe_key" opt-in semantics:
+        // a new generated key means each call inserts a distinct row.
+        let dedupe_key = proposal
+            .dedupe_key
+            .clone()
+            .unwrap_or_else(|| format!("auto:{}", Uuid::new_v4()));
+        let mut proposal_to_insert = proposal.clone();
+        proposal_to_insert.dedupe_key = Some(dedupe_key.clone());
 
         let sql = r#"
 INSERT INTO horizons_action_proposals
@@ -114,11 +128,11 @@ VALUES
 ON CONFLICT(org_id, dedupe_key) DO NOTHING
 "#;
 
-        let payload_json = serde_json::to_string(&proposal.payload)
+        let payload_json = serde_json::to_string(&proposal_to_insert.payload)
             .map_err(|e| Error::backend("serialize action payload", e))?;
-        let context_json = serde_json::to_string(&proposal.context)
+        let context_json = serde_json::to_string(&proposal_to_insert.context)
             .map_err(|e| Error::backend("serialize action context", e))?;
-        let execution_json = proposal
+        let execution_json = proposal_to_insert
             .execution_result
             .as_ref()
             .map(|v| serde_json::to_string(v))
@@ -126,34 +140,58 @@ ON CONFLICT(org_id, dedupe_key) DO NOTHING
             .map_err(|e| Error::backend("serialize execution result", e))?;
 
         let params = vec![
-            ProjectDbParam::String(proposal.id.to_string()),
-            ProjectDbParam::String(proposal.org_id.to_string()),
-            ProjectDbParam::String(proposal.project_id.to_string()),
-            ProjectDbParam::String(proposal.agent_id.clone()),
-            ProjectDbParam::String(proposal.action_type.clone()),
-            ProjectDbParam::String(risk_to_str(proposal.risk_level).to_string()),
+            ProjectDbParam::String(proposal_to_insert.id.to_string()),
+            ProjectDbParam::String(proposal_to_insert.org_id.to_string()),
+            ProjectDbParam::String(proposal_to_insert.project_id.to_string()),
+            ProjectDbParam::String(proposal_to_insert.agent_id.clone()),
+            ProjectDbParam::String(proposal_to_insert.action_type.clone()),
+            ProjectDbParam::String(risk_to_str(proposal_to_insert.risk_level).to_string()),
             ProjectDbParam::String(mode_to_str(review_mode).to_string()),
             ProjectDbParam::String(payload_json),
             ProjectDbParam::String(context_json),
-            ProjectDbParam::String(proposal.dedupe_key.clone()),
-            ProjectDbParam::String(status_to_str(proposal.status).to_string()),
-            ProjectDbParam::String(proposal.created_at.to_rfc3339()),
-            ProjectDbParam::String(proposal.expires_at.to_rfc3339()),
-            ProjectDbParam::String(
-                proposal
-                    .decided_at
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_default(),
-            ),
-            ProjectDbParam::String(proposal.decided_by.clone().unwrap_or_default()),
-            ProjectDbParam::String(proposal.decision_reason.clone().unwrap_or_default()),
-            ProjectDbParam::String(execution_json.unwrap_or_default()),
+            ProjectDbParam::String(dedupe_key.clone()),
+            ProjectDbParam::String(status_to_str(proposal_to_insert.status).to_string()),
+            ProjectDbParam::String(proposal_to_insert.created_at.to_rfc3339()),
+            ProjectDbParam::String(proposal_to_insert.expires_at.to_rfc3339()),
+            proposal_to_insert
+                .decided_at
+                .map(|d| ProjectDbParam::String(d.to_rfc3339()))
+                .unwrap_or(ProjectDbParam::Null),
+            proposal_to_insert
+                .decided_by
+                .clone()
+                .map(ProjectDbParam::String)
+                .unwrap_or(ProjectDbParam::Null),
+            proposal_to_insert
+                .decision_reason
+                .clone()
+                .map(ProjectDbParam::String)
+                .unwrap_or(ProjectDbParam::Null),
+            execution_json
+                .map(ProjectDbParam::String)
+                .unwrap_or(ProjectDbParam::Null),
         ];
 
-        self.project_db
+        let rows = self
+            .project_db
             .execute(org_id, handle, sql, &params)
             .await?;
-        Ok(())
+
+        // Idempotency: if we hit the unique constraint, return the existing row and
+        // ensure downstream logic doesn't trigger side effects twice.
+        if rows == 0 {
+            let Some(existing) = self
+                .get_action_by_dedupe_key(org_id, handle, &dedupe_key)
+                .await?
+            else {
+                return Err(Error::BackendMessage(
+                    "action proposal dedupe_key conflict but existing row not found".to_string(),
+                ));
+            };
+            return Ok((existing.0, existing.1, false));
+        }
+
+        Ok((proposal_to_insert, review_mode, true))
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -231,6 +269,36 @@ SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_action_by_dedupe_key(
+        &self,
+        org_id: OrgId,
+        handle: &ProjectDbHandle,
+        dedupe_key: &str,
+    ) -> Result<Option<(ActionProposal, ReviewMode)>> {
+        self.ensure_schema(org_id, handle).await?;
+        let sql = r#"
+SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
+       payload_json, context_json, dedupe_key, status, created_at, expires_at,
+       decided_at, decided_by, decision_reason, execution_result_json
+  FROM horizons_action_proposals
+ WHERE org_id = ?1 AND dedupe_key = ?2
+ LIMIT 1
+"#;
+        let params = vec![
+            ProjectDbParam::String(org_id.to_string()),
+            ProjectDbParam::String(dedupe_key.to_string()),
+        ];
+        let rows = self.project_db.query(org_id, handle, sql, &params).await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = &rows[0];
+        let review_mode = mode_from_str(&get_string(row, "review_mode")?)?;
+        let p = action_from_row(row)?;
+        Ok(Some((p, review_mode)))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn publish_action_event(
         &self,
         p: &ActionProposal,
@@ -257,7 +325,11 @@ SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
             topic,
             format!("agent:{}", p.agent_id),
             payload,
-            format!("action:{}:{}", p.action_type, p.dedupe_key),
+            format!(
+                "action:{}:{}",
+                p.action_type,
+                p.dedupe_key.clone().unwrap_or_else(|| p.id.to_string())
+            ),
             serde_json::json!({}),
             None,
         )
@@ -401,30 +473,37 @@ impl CoreAgents for CoreAgentsExecutor {
 
         // Persist proposed action.
         let project_db = proposal_project_db_handle(&proposal)?;
-        self.insert_action(proposal.org_id, &project_db, &proposal, mode)
+        let (stored, stored_mode, inserted) = self
+            .insert_action(proposal.org_id, &project_db, &proposal, mode)
             .await?;
+
+        // If this is an idempotent duplicate, return the existing proposal ID and do not
+        // re-trigger audits/approvals/execution side effects.
+        if !inserted {
+            return Ok(stored.id);
+        }
 
         self.audit(AuditEntry {
             id: Uuid::new_v4(),
-            org_id: proposal.org_id,
-            project_id: Some(proposal.project_id),
+            org_id: stored.org_id,
+            project_id: Some(stored.project_id),
             actor: identity.clone(),
             action: "core_agents.action.proposed".to_string(),
-            payload: serde_json::to_value(&proposal)
+            payload: serde_json::to_value(&stored)
                 .map_err(|e| Error::backend("serialize proposal", e))?,
             outcome: "ok".to_string(),
             created_at: Utc::now(),
         })
         .await?;
 
-        match mode {
+        match stored_mode {
             ReviewMode::Auto => {
                 // Auto-approve and execute immediately.
                 self.approve(
-                    proposal.org_id,
-                    proposal.project_id,
+                    stored.org_id,
+                    stored.project_id,
                     &project_db,
-                    proposal.id,
+                    stored.id,
                     "auto",
                     "auto-approved",
                 )
@@ -433,16 +512,16 @@ impl CoreAgents for CoreAgentsExecutor {
             ReviewMode::Ai => {
                 // AI review if configured, else policy resolution already downgraded to Human.
                 let Some(approver) = self.ai_approver.clone() else {
-                    return Ok(proposal.id);
+                    return Ok(stored.id);
                 };
-                let decision = approver.review(&policy, &proposal, identity).await?;
+                let decision = approver.review(&policy, &stored, identity).await?;
                 match decision {
                     ReviewDecision::Approved { reason } => {
                         self.approve(
-                            proposal.org_id,
-                            proposal.project_id,
+                            stored.org_id,
+                            stored.project_id,
                             &project_db,
-                            proposal.id,
+                            stored.id,
                             approver.name(),
                             &reason,
                         )
@@ -450,10 +529,10 @@ impl CoreAgents for CoreAgentsExecutor {
                     }
                     ReviewDecision::Denied { reason } => {
                         self.deny(
-                            proposal.org_id,
-                            proposal.project_id,
+                            stored.org_id,
+                            stored.project_id,
                             &project_db,
-                            proposal.id,
+                            stored.id,
                             approver.name(),
                             &reason,
                         )
@@ -466,7 +545,7 @@ impl CoreAgents for CoreAgentsExecutor {
             }
         }
 
-        Ok(proposal.id)
+        Ok(stored.id)
     }
 
     #[tracing::instrument(level = "info", skip_all)]
@@ -705,6 +784,23 @@ fn get_string(row: &ProjectDbRow, col: &str) -> Result<String> {
     }
 }
 
+fn get_opt_string(row: &ProjectDbRow, col: &str) -> Result<Option<String>> {
+    match row.get(col) {
+        Some(ProjectDbValue::Null) => Ok(None),
+        Some(ProjectDbValue::String(s)) => {
+            if s.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(s.clone()))
+            }
+        }
+        Some(v) => Err(Error::BackendMessage(format!(
+            "unexpected column type for {col}: {v:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
 fn parse_dt(s: &str, col: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -724,7 +820,7 @@ fn action_from_row(row: &ProjectDbRow) -> Result<ActionProposal> {
     let agent_id = get_string(row, "agent_id")?;
     let action_type = get_string(row, "action_type")?;
     let risk = risk_from_str(&get_string(row, "risk_level")?)?;
-    let dedupe_key = get_string(row, "dedupe_key")?;
+    let dedupe_key = get_opt_string(row, "dedupe_key")?;
     let status = status_from_str(&get_string(row, "status")?)?;
 
     let payload_json = get_string(row, "payload_json")?;
@@ -738,25 +834,18 @@ fn action_from_row(row: &ProjectDbRow) -> Result<ActionProposal> {
     let created_at = parse_dt(&get_string(row, "created_at")?, "created_at")?;
     let expires_at = parse_dt(&get_string(row, "expires_at")?, "expires_at")?;
 
-    let decided_at = match row.get("decided_at") {
-        Some(ProjectDbValue::String(s)) if !s.trim().is_empty() => Some(parse_dt(s, "decided_at")?),
-        _ => None,
-    };
-    let decided_by = match row.get("decided_by") {
-        Some(ProjectDbValue::String(s)) if !s.trim().is_empty() => Some(s.clone()),
-        _ => None,
-    };
-    let decision_reason = match row.get("decision_reason") {
-        Some(ProjectDbValue::String(s)) if !s.trim().is_empty() => Some(s.clone()),
-        _ => None,
-    };
-    let execution_result = match row.get("execution_result_json") {
-        Some(ProjectDbValue::String(s)) if !s.trim().is_empty() => {
-            let v: serde_json::Value = serde_json::from_str(s)
+    let decided_at = get_opt_string(row, "decided_at")?
+        .map(|s| parse_dt(&s, "decided_at"))
+        .transpose()?;
+    let decided_by = get_opt_string(row, "decided_by")?;
+    let decision_reason = get_opt_string(row, "decision_reason")?;
+    let execution_result = match get_opt_string(row, "execution_result_json")? {
+        Some(s) => {
+            let v: serde_json::Value = serde_json::from_str(&s)
                 .map_err(|e| Error::backend("deserialize execution_result_json", e))?;
             Some(v)
         }
-        _ => None,
+        None => None,
     };
 
     Ok(ActionProposal {

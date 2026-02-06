@@ -1,7 +1,12 @@
 #![forbid(unsafe_code)]
 
-pub mod dev_backends;
-pub mod error;
-pub mod extract;
-pub mod routes;
-pub mod server;
+mod apis;
+mod client;
+mod error;
+mod types;
+
+pub use apis::*;
+pub use client::{ClientOptions, HorizonsClient};
+pub use error::{HorizonsError, HorizonsErrorKind};
+pub use types::*;
+

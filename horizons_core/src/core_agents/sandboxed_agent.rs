@@ -124,6 +124,7 @@ impl SandboxedAgent {
             env_vars,
             timeout_seconds: self.timeout_seconds,
             workdir: self.workdir.clone(),
+            restart_policy: None,
         }
     }
 }
@@ -200,7 +201,7 @@ impl AgentSpec for SandboxedAgent {
             "agent.sandbox.result",
             payload,
             risk,
-            dedupe_key,
+            Some(dedupe_key),
             context,
             now,
             3600, // 1 hour TTL

@@ -128,6 +128,7 @@ async fn run_engine(
         env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
+        restart_policy: None,
     };
 
     let (result, handle) = runtime.run_agent(&config, &req.instruction).await?;
@@ -176,20 +177,17 @@ async fn start_engine(
         env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
+        restart_policy: None,
     };
 
-    let (handle, session_id) = runtime.start_agent(&config, &req.instruction).await?;
-
-    // Store the handle for later access.
-    {
-        let mut handles = state.sandbox_handles.write().await;
-        handles.insert(handle.id.clone(), handle.clone());
-    }
+    let run = runtime
+        .start_agent_tracked(_org_id.to_string(), None, &config, &req.instruction)
+        .await?;
 
     Ok(Json(StartEngineResponse {
-        handle_id: handle.id,
-        session_id,
-        sandbox_agent_url: handle.sandbox_agent_url,
+        handle_id: run.run_id,
+        session_id: run.session_id,
+        sandbox_agent_url: run.sandbox.sandbox_agent_url,
     }))
 }
 
@@ -202,23 +200,24 @@ async fn events_sse(
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>> + Send>, ApiError> {
-    let handle = {
-        let handles = state.sandbox_handles.read().await;
-        handles.get(&handle_id).cloned().ok_or_else(|| {
-            ApiError::Core(horizons_core::Error::NotFound(format!(
-                "sandbox handle not found: {handle_id}"
-            )))
-        })?
-    };
+    let runtime = state
+        .sandbox_runtime
+        .as_ref()
+        .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
+    let run = runtime.get_active(&handle_id).ok_or_else(|| {
+        ApiError::Core(horizons_core::Error::NotFound(format!(
+            "sandbox run not found: {handle_id}"
+        )))
+    })?;
 
-    let client = SandboxAgentClient::new(&handle.sandbox_agent_url, None);
+    let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     tokio::spawn(async move {
         let mut offset: u64 = 0;
 
         loop {
-            match client.fetch_events("", offset).await {
+            match client.fetch_events(&run.session_id, offset).await {
                 Ok(resp) => {
                     for event in &resp.events {
                         if let Some(seq) = event.get("sequence").and_then(|v| v.as_u64()) {
@@ -274,16 +273,7 @@ async fn release_engine(
         .as_ref()
         .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
 
-    let handle = {
-        let mut handles = state.sandbox_handles.write().await;
-        handles.remove(&handle_id).ok_or_else(|| {
-            ApiError::Core(horizons_core::Error::NotFound(format!(
-                "sandbox handle not found: {handle_id}"
-            )))
-        })?
-    };
-
-    runtime.release(&handle).await?;
+    runtime.release_run(&handle_id).await?;
 
     Ok(Json(serde_json::json!({
         "released": true,
@@ -300,16 +290,17 @@ async fn health_engine(
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
 ) -> Result<Json<HealthResponse>, ApiError> {
-    let handle = {
-        let handles = state.sandbox_handles.read().await;
-        handles.get(&handle_id).cloned().ok_or_else(|| {
-            ApiError::Core(horizons_core::Error::NotFound(format!(
-                "sandbox handle not found: {handle_id}"
-            )))
-        })?
-    };
+    let runtime = state
+        .sandbox_runtime
+        .as_ref()
+        .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
+    let run = runtime.get_active(&handle_id).ok_or_else(|| {
+        ApiError::Core(horizons_core::Error::NotFound(format!(
+            "sandbox run not found: {handle_id}"
+        )))
+    })?;
 
-    let client = SandboxAgentClient::new(&handle.sandbox_agent_url, None);
+    let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
     let healthy = client.health().await.unwrap_or(false);
 
     Ok(Json(HealthResponse { healthy }))

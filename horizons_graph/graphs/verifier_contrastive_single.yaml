@@ -1,0 +1,111 @@
+name: zero_shot_verifier_contrastive_single
+metadata:
+  type: VerifierGraph
+  description: |
+    Zero-shot contrastive evaluation using single LLM call.
+    Compares output against gold-standard examples to score similarity.
+    Best for short traces (< 50K tokens).
+
+start_nodes: [evaluate]
+
+nodes:
+  evaluate:
+    name: evaluate
+    type: DagNode
+    input_mapping: '{"trace": state.get("trace", {}), "gold_examples": state.get("gold_examples", []), "expected_rubric": state.get("expected_rubric", ""), "system_prompt": state.get("system_prompt", ""), "user_prompt": state.get("user_prompt", ""), "options": state.get("options", {})}'
+    output_mapping:
+      outcome_review: evaluate_output.outcome_review
+      event_reviews: evaluate_output.event_reviews
+      event_totals: evaluate_output.event_totals
+      score: evaluate_output.outcome_review.total
+    implementation:
+      type: template_transform
+      model_name: MUST_OVERRIDE_MODEL
+      temperature: 0.0
+      max_tokens: 4096
+      response_format:
+        type: json_object
+      sequence:
+        template_likes:
+          - type: prompt_template
+            message_type: SYSTEM
+            input_fields:
+              system_prompt:
+                field_name: system_prompt
+                description: Custom system prompt (optional)
+                is_required: false
+            structured_template: |
+              <input>system_prompt</input>
+
+              You are a strict judge comparing outputs against gold-standard examples.
+              Your job is to determine whether the output could plausibly have come from the same source as the gold examples.
+
+              IMPORTANT: Generic, standard, or typical outputs should score BELOW 0.3 - even if they are high quality.
+              The gold examples demonstrate specific, distinctive characteristics. Only outputs that capture those same distinctive characteristics should score above 0.3.
+              Heavily penalize obvious, giveaway discrepancies in voice, structure, or specificity.
+          - type: prompt_template
+            message_type: USER
+            input_fields:
+              gold_examples:
+                field_name: gold_examples
+                description: List of gold examples with gold_score (0-1), gold_reasoning, and trace
+                is_required: true
+              trace:
+                field_name: trace
+                description: The execution trace being evaluated
+                is_required: true
+              expected_rubric:
+                field_name: expected_rubric
+                description: Optional rubric or additional context for evaluation
+                is_required: false
+              user_prompt:
+                field_name: user_prompt
+                description: Custom user prompt (optional)
+                is_required: false
+            structured_template: |
+              <input>user_prompt</input>
+
+              ## Gold Examples
+              These examples define the target quality. Each has a score (0-1) and reasoning explaining why.
+              Study these to understand what high-quality and low-quality outputs look like.
+
+              <input>gold_examples</input>
+
+              ## Additional Context
+              <input>expected_rubric</input>
+
+              ## Output to Evaluate
+              <input>trace</input>
+
+              ## Scoring Instructions
+              The key question: could this output plausibly have come from the same source as the gold examples? Or is it clearly distinguishable?
+
+              START AT 1.0 AND DEDUCT POINTS for each discrepancy you observe:
+              - Obvious/giveaway discrepancy (clearly different voice, generic filler, missing required structure): deduct 0.15-0.3 per instance
+              - Major discrepancy (clearly different approach/pattern): deduct 0.08-0.15 per instance
+              - Minor discrepancy (subtle difference): deduct 0.02-0.08 per instance
+
+              Score ranges after deductions:
+              - 0.7-1.0: Few discrepancies. Output genuinely shares the distinctive characteristics of gold examples.
+              - 0.3-0.7: Multiple discrepancies. Some elements align, but notable divergences exist.
+              - 0.0-0.3: Many discrepancies. Clearly distinguishable from gold examples.
+
+              Be thorough: identify and penalize EVERY discrepancy you observe. Generic, standard outputs should accumulate many deductions.
+              If obvious giveaway discrepancies appear, the score should drop quickly and rarely remain above 0.7.
+
+              ## Output Format
+              Return ONLY a JSON object with exactly these top-level keys:
+              - event_reviews: List with one review per event, each containing:
+                - criteria: Dict of {criterion_id: {score: float 0-1, reason: string, weight: float}}
+                - total: Overall score for this event (0.0-1.0)
+                - summary: Brief description of the event and how it compares to gold examples
+              - outcome_review: Overall evaluation with same structure (criteria, total, summary)
+              - event_totals: List of the total score for each event
+
+control_edges:
+  evaluate: []
+
+verdict_weights:
+  evaluate: 1.0
+
+aggregation_policy: weighted_average

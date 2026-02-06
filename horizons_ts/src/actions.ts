@@ -9,7 +9,7 @@ export class ActionsAPI {
     action_type: string;
     payload: unknown;
     risk_level: RiskLevel;
-    dedupe_key: string;
+    dedupe_key?: string;
     context: unknown;
     ttl_seconds?: number;
     project_id?: string;

@@ -86,6 +86,19 @@ pub struct SandboxConfig {
     pub timeout_seconds: u64,
     /// Working directory inside the container where task files reside.
     pub workdir: Option<String>,
+
+    /// Optional restart policy for long-running sandboxes started via `start_agent_tracked`.
+    /// One-shot runs (`run_agent`) do not use this.
+    #[serde(default)]
+    pub restart_policy: Option<RestartPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartPolicy {
+    /// Maximum number of restarts for a run. `0` disables restarts.
+    pub max_restarts: u32,
+    /// Base backoff in milliseconds (exponential).
+    pub backoff_ms: u64,
 }
 
 impl Default for SandboxConfig {
@@ -98,6 +111,7 @@ impl Default for SandboxConfig {
             env_vars: HashMap::new(),
             timeout_seconds: 1800,
             workdir: None,
+            restart_policy: None,
         }
     }
 }

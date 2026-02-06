@@ -175,7 +175,12 @@ class HorizonsClient:
 
         return EngineAPI(self)
 
+    @property
+    def pipelines(self):
+        from .pipelines import PipelinesAPI
+
+        return PipelinesAPI(self)
+
     async def health(self) -> Any:
         resp = await self._request("GET", "/api/v1/health")
         return await self.json(resp)
-

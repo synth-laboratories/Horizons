@@ -138,7 +138,9 @@ pub struct ActionProposal {
     pub action_type: String,
     pub payload: serde_json::Value,
     pub risk_level: RiskLevel,
-    pub dedupe_key: String,
+    /// Optional idempotency key. If `None`, the proposal is treated as non-idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
     pub context: serde_json::Value,
 
     pub status: ActionStatus,
@@ -159,7 +161,7 @@ impl ActionProposal {
         action_type: impl Into<String> + std::fmt::Debug,
         payload: serde_json::Value,
         risk_level: RiskLevel,
-        dedupe_key: impl Into<String> + std::fmt::Debug,
+        dedupe_key: Option<String>,
         context: serde_json::Value,
         created_at: DateTime<Utc>,
         ttl_seconds: u64,
@@ -176,11 +178,12 @@ impl ActionProposal {
                 "action proposal action_type is empty".to_string(),
             ));
         }
-        let dedupe_key = dedupe_key.into();
-        if dedupe_key.trim().is_empty() {
-            return Err(Error::InvalidInput(
-                "action proposal dedupe_key is empty".to_string(),
-            ));
+        if let Some(dk) = &dedupe_key {
+            if dk.trim().is_empty() {
+                return Err(Error::InvalidInput(
+                    "action proposal dedupe_key is empty".to_string(),
+                ));
+            }
         }
         if ttl_seconds == 0 {
             return Err(Error::InvalidInput(

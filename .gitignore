@@ -11,6 +11,10 @@ __pycache__/
 *.egg-info/
 *.pyc
 
+# Node
+**/node_modules/
+**/dist/
+
 # IDE
 .idea/
 .vscode/

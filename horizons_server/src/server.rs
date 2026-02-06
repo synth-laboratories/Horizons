@@ -4,7 +4,6 @@ use axum::{Extension, Router};
 use horizons_core::context_refresh::traits::ContextRefresh;
 use horizons_core::core_agents::executor::CoreAgentsExecutor;
 use horizons_core::core_agents::mcp_gateway::McpGateway;
-use horizons_core::engine::models::SandboxHandle;
 use horizons_core::engine::sandbox_runtime::SandboxRuntime;
 #[cfg(feature = "evaluation")]
 use horizons_core::evaluation::engine::EvaluationEngine;
@@ -14,13 +13,15 @@ use horizons_core::memory::traits::HorizonsMemory;
 use horizons_core::onboard::traits::{
     Cache, CentralDb, Filestore, GraphStore, ProjectDb, VectorStore,
 };
+use horizons_graph::GraphEngine;
 #[cfg(feature = "optimization")]
 use horizons_core::optimization::engine::OptimizationEngine;
-use std::collections::HashMap;
+use horizons_core::pipelines::traits::PipelineRunner;
+#[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
+use horizons_core::optimization::continual::ContinualLearningEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -33,23 +34,24 @@ pub struct AppState {
     pub cache: Arc<dyn Cache>,
     pub graph_store: Arc<dyn GraphStore>,
     pub vector_store: Arc<dyn VectorStore>,
+    pub graph_engine: Arc<GraphEngine>,
     pub event_bus: Arc<dyn EventBus>,
     pub context_refresh: Arc<dyn ContextRefresh>,
     pub core_agents: Arc<CoreAgentsExecutor>,
+    pub pipelines: Arc<dyn PipelineRunner>,
     /// MCP gateway for tool proxying (optional; configured via env).
     pub mcp_gateway: Option<Arc<McpGateway>>,
     /// Sandbox runtime for executing coding agents in containers.
     /// None if the sandbox engine is not configured.
     pub sandbox_runtime: Option<Arc<SandboxRuntime>>,
-    /// Active sandbox handles, keyed by handle ID. Used by the engine routes
-    /// for event streaming and release.
-    pub sandbox_handles: Arc<RwLock<HashMap<String, SandboxHandle>>>,
     #[cfg(feature = "memory")]
     pub memory: Arc<dyn HorizonsMemory>,
     #[cfg(feature = "optimization")]
     pub optimization: Arc<OptimizationEngine>,
     #[cfg(feature = "evaluation")]
     pub evaluation: Arc<EvaluationEngine>,
+    #[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
+    pub continual_learning: Arc<ContinualLearningEngine>,
     pub started_at: Instant,
 }
 
@@ -62,14 +64,18 @@ impl AppState {
         cache: Arc<dyn Cache>,
         graph_store: Arc<dyn GraphStore>,
         vector_store: Arc<dyn VectorStore>,
+        graph_engine: Arc<GraphEngine>,
         event_bus: Arc<dyn EventBus>,
         context_refresh: Arc<dyn ContextRefresh>,
         core_agents: Arc<CoreAgentsExecutor>,
+        pipelines: Arc<dyn PipelineRunner>,
         mcp_gateway: Option<Arc<McpGateway>>,
         sandbox_runtime: Option<Arc<SandboxRuntime>>,
         #[cfg(feature = "memory")] memory: Arc<dyn HorizonsMemory>,
         #[cfg(feature = "optimization")] optimization: Arc<OptimizationEngine>,
         #[cfg(feature = "evaluation")] evaluation: Arc<EvaluationEngine>,
+        #[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
+        continual_learning: Arc<ContinualLearningEngine>,
     ) -> Self {
         Self {
             central_db,
@@ -78,18 +84,21 @@ impl AppState {
             cache,
             graph_store,
             vector_store,
+            graph_engine,
             event_bus,
             context_refresh,
             core_agents,
+            pipelines,
             mcp_gateway,
             sandbox_runtime,
-            sandbox_handles: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "memory")]
             memory,
             #[cfg(feature = "optimization")]
             optimization,
             #[cfg(feature = "evaluation")]
             evaluation,
+            #[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
+            continual_learning,
             started_at: Instant::now(),
         }
     }
@@ -117,6 +126,18 @@ pub fn router(state: AppState) -> Router {
 
 #[tracing::instrument(level = "info", skip_all)]
 pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
+    // If sandbox execution is configured, run a background crash monitor for long-running runs.
+    if let Some(rt) = state.sandbox_runtime.clone() {
+        let monitor = horizons_core::engine::health_monitor::SandboxHealthMonitor::new(
+            rt,
+            state.event_bus.clone(),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        tokio::spawn(async move {
+            monitor.run(cancel).await;
+        });
+    }
+
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

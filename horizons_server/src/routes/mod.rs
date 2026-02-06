@@ -16,6 +16,7 @@ pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
 pub mod onboard;
+pub mod pipelines;
 #[cfg(feature = "optimization")]
 pub mod optimization;
 pub mod projects;
@@ -40,6 +41,7 @@ fn api_v1_router() -> Router {
             .merge(context_refresh::router())
             .merge(agents::router())
             .merge(actions::router())
+            .merge(pipelines::router())
             .merge(engine::router())
             .merge(mcp::router())
             .merge(feature_routers())

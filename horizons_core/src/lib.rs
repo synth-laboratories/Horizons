@@ -12,6 +12,7 @@ pub mod memory;
 pub mod models;
 pub mod o11y;
 pub mod onboard;
+pub mod pipelines;
 #[cfg(feature = "optimization")]
 pub mod optimization;
 
