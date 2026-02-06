@@ -30,24 +30,10 @@ default = []
 memory = ["horizons_core/memory"]
 optimization = ["horizons_core/optimization"]
 evaluation = ["horizons_core/evaluation"]
-linkedin = []
-jira = []
-gmail = []
-slack = []
-github = []
-linear = []
-hubspot = []
 sqs = []
 rabbitmq = []
 pgvector = ["dep:sqlx", "dep:tokio"]
 all = [
-  "jira",
-  "linkedin",
-  "gmail",
-  "slack",
-  "github",
-  "linear",
-  "hubspot",
   "sqs",
   "rabbitmq",
   "pgvector",

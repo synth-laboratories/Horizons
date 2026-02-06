@@ -6,9 +6,9 @@ Platform for building, evaluating, and optimizing AI agents in production. Provi
 
 | Crate | Version | Description |
 |-------|---------|-------------|
-| `horizons_core` | 0.0.0 | Core domain — events, context refresh, agent actions, onboarding, project DB |
-| `horizons_rs` | 0.0.0 | HTTP API server (Axum) with dev-mode in-memory backends |
-| `horizons_integrations` | 0.0.0 | Connectors (Jira, LinkedIn, Langfuse) and queue backends (SQS, RabbitMQ) |
+| `horizons_core` | 0.1.0 | Core domain — events, context refresh, agent actions, sandbox engine, onboarding, project DB |
+| `horizons_rs` | 0.1.0 | HTTP API server (Axum) with dev-mode in-memory backends |
+| `horizons_integrations` | 0.1.0 | Infrastructure integrations: queue backends (SQS, RabbitMQ), pgvector, Langfuse |
 | `voyager` | 0.1.0 | Agent memory — store, retrieve, and rank episodic and semantic memories |
 | `mipro_v2` | 0.1.0 | Prompt optimization — dataset splits, candidate generation, early stopping |
 | `rlm` | 0.1.0 | Evaluation — reward signals, weighted scoring, pass/fail verification |
@@ -19,8 +19,8 @@ All crates use Rust edition 2024.
 
 | SDK | Version | Path |
 |-----|---------|------|
-| Python (`horizons`) | 0.0.6 | `horizons_py/` |
-| TypeScript (`@horizons/sdk`) | 0.0.6 | `horizons_ts/` |
+| Python (`horizons`) | 0.1.0 | `horizons_py/` |
+| TypeScript (`@horizons/sdk`) | 0.1.0 | `horizons_ts/` |
 
 ## Getting Started
 
@@ -69,17 +69,19 @@ npm run build
 ```
 horizons_rs (HTTP API)
 ├── horizons_core
-│   ├── events        — publish/subscribe on dot-delimited topics, glob matching, retry + DLQ
+│   ├── events         — publish/subscribe on dot-delimited topics, glob matching, retry + DLQ
 │   ├── context_refresh — pull from external sources on cron or event triggers
-│   ├── core_agents   — action proposals, risk levels, review policies (auto/AI/human)
-│   └── onboard       — project DB (Turso/Postgres/S3), user roles, audit log
+│   ├── core_agents    — action proposals, risk levels, review policies (auto/AI/human)
+│   ├── engine         — sandbox runtime (Docker/Daytona), sandbox-agent client, agent scheduling
+│   ├── onboard        — project DB (Turso/Postgres/S3), user roles, audit log
+│   └── o11y           — OpenTelemetry + Langfuse observability
 ├── horizons_integrations
-│   ├── connectors    — Jira, LinkedIn
 │   ├── queue_backends — SQS, RabbitMQ
-│   └── langfuse      — trace export
-├── voyager           — episodic memory with relevance/recency/importance ranking
-├── mipro_v2          — MiPRO prompt optimization with holdout evaluation
-└── rlm               — reward signals (exact match, contains, LLM rubric), weighted scoring
+│   ├── vector         — pgvector (VectorStore)
+│   └── langfuse       — trace export
+├── voyager            — episodic memory with relevance/recency/importance ranking
+├── mipro_v2           — MiPRO prompt optimization with holdout evaluation
+└── rlm                — reward signals (exact match, contains, LLM rubric), weighted scoring
 ```
 
 ## License
