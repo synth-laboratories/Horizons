@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "horizons_core",
   "horizons_rs",
+  "horizons_server",
   "horizons_integrations",
   "horizons_graph",
   "voyager",

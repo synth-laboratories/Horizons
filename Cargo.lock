@@ -2356,6 +2356,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizons-ai"
+version = "0.1.2-dev.0"
+dependencies = [
+ "async-stream",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "horizons_core"
 version = "0.1.2-dev.0"
 dependencies = [
@@ -2452,7 +2468,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "horizons_rs"
+name = "horizons_server"
 version = "0.1.2-dev.0"
 dependencies = [
  "anyhow",
