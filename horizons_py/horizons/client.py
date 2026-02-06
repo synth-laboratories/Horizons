@@ -69,7 +69,6 @@ class HorizonsClient:
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Any] = None,
         headers: Optional[Dict[str, str]] = None,
-        stream: bool = False,
     ) -> httpx.Response:
         resp = await self._client.request(
             method,
@@ -77,9 +76,8 @@ class HorizonsClient:
             params=params,
             json=json,
             headers=self._headers(headers),
-            timeout=None if stream else DEFAULT_TIMEOUT,
+            timeout=DEFAULT_TIMEOUT,
             follow_redirects=False,
-            stream=stream,
         )
         return resp
 
