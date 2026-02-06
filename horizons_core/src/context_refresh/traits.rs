@@ -60,7 +60,7 @@ pub struct PullResult {
 
 /// A connector pulls and processes data from an external system.
 ///
-/// Connector implementations live in `horizons_integrations` or customer code.
+/// Connector implementations live in product repos (e.g. `or-context` for OpenRevenue).
 #[async_trait]
 pub trait Connector: Send + Sync {
     /// Connector identifier (stable, used in `SourceConfig.connector_id`).
