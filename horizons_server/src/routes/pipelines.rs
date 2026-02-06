@@ -53,7 +53,9 @@ pub async fn run(
             if let StepKind::Agent { spec } = &mut step.kind {
                 if let serde_json::Value::Object(m) = &mut spec.context {
                     m.entry("_project_db_handle".to_string())
-                        .or_insert_with(|| serde_json::to_value(&handle).unwrap_or(serde_json::Value::Null));
+                        .or_insert_with(|| {
+                            serde_json::to_value(&handle).unwrap_or(serde_json::Value::Null)
+                        });
                 } else if spec.context.is_null() {
                     spec.context = serde_json::json!({ "_project_db_handle": handle });
                 } else {
@@ -63,7 +65,10 @@ pub async fn run(
         }
     }
 
-    let run = state.pipelines.run(&req.spec, req.inputs, &identity).await?;
+    let run = state
+        .pipelines
+        .run(&req.spec, req.inputs, &identity)
+        .await?;
     Ok(Json(run))
 }
 

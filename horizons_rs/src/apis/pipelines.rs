@@ -13,7 +13,11 @@ impl PipelinesApi {
         Self { client }
     }
 
-    pub async fn run(&self, spec: Value, inputs: Option<Value>) -> Result<PipelineRun, HorizonsError> {
+    pub async fn run(
+        &self,
+        spec: Value,
+        inputs: Option<Value>,
+    ) -> Result<PipelineRun, HorizonsError> {
         #[derive(Serialize)]
         struct Body {
             spec: Value,
@@ -25,7 +29,12 @@ impl PipelinesApi {
         };
         let v = self
             .client
-            .request_value(Method::POST, "/api/v1/pipelines/run", None::<&()>, Some(&body))
+            .request_value(
+                Method::POST,
+                "/api/v1/pipelines/run",
+                None::<&()>,
+                Some(&body),
+            )
             .await?;
         Ok(serde_json::from_value::<PipelineRun>(v)?)
     }
@@ -71,4 +80,3 @@ impl PipelinesApi {
             .await
     }
 }
-

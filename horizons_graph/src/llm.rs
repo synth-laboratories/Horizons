@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
-use tiktoken_rs::{cl100k_base, get_bpe_from_model, CoreBPE};
+use serde_json::{Value, json};
+use tiktoken_rs::{CoreBPE, cl100k_base, get_bpe_from_model};
 
 use crate::error::{GraphError, Result};
 
@@ -136,7 +136,10 @@ impl LlmClient {
             .map_err(|err| GraphError::internal(format!("llm request failed: {err}")))?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
             return Err(GraphError::internal(format!(
                 "llm request failed ({status}): {body}"
             )));
@@ -147,8 +150,8 @@ impl LlmClient {
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
             while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|err| GraphError::internal(format!("llm stream error: {err}")))?;
+                let chunk = chunk
+                    .map_err(|err| GraphError::internal(format!("llm stream error: {err}")))?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(event) = next_sse_event(&mut buffer) {
                     if event == "[DONE]" {
@@ -241,7 +244,10 @@ impl LlmClient {
             .map_err(|err| GraphError::internal(format!("llm request failed: {err}")))?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
             return Err(GraphError::internal(format!(
                 "llm request failed ({status}): {body}"
             )));
@@ -252,8 +258,8 @@ impl LlmClient {
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
             while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|err| GraphError::internal(format!("llm stream error: {err}")))?;
+                let chunk = chunk
+                    .map_err(|err| GraphError::internal(format!("llm stream error: {err}")))?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(event) = next_sse_event(&mut buffer) {
                     if event == "[DONE]" {
@@ -299,15 +305,20 @@ impl LlmClient {
     }
 }
 
-pub fn resolve_endpoint(
-    model: &str,
-    implementation: Option<&Value>,
-) -> Result<LlmEndpoint> {
+pub fn resolve_endpoint(model: &str, implementation: Option<&Value>) -> Result<LlmEndpoint> {
     let mut api_base = implementation
         .and_then(|v| v.get("api_base"))
         .and_then(|v| v.as_str())
-        .or_else(|| implementation.and_then(|v| v.get("base_url")).and_then(|v| v.as_str()))
-        .or_else(|| implementation.and_then(|v| v.get("api_url")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            implementation
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            implementation
+                .and_then(|v| v.get("api_url"))
+                .and_then(|v| v.as_str())
+        })
         .map(|v| v.to_string());
 
     if api_base.is_none() {
@@ -383,7 +394,9 @@ pub fn resolve_endpoint(
 
 fn normalize_api_base(base: &str) -> String {
     let trimmed = base.trim_end_matches('/');
-    let trimmed = trimmed.trim_end_matches("/chat/completions").trim_end_matches("/responses");
+    let trimmed = trimmed
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches("/responses");
     trimmed.to_string()
 }
 
@@ -455,7 +468,10 @@ fn extract_response_text(value: &Value) -> Option<String> {
 fn extract_response_delta(value: &Value) -> Option<String> {
     let event_type = value.get("type")?.as_str()?;
     if event_type.ends_with("output_text.delta") {
-        return value.get("delta").and_then(|v| v.as_str()).map(|v| v.to_string());
+        return value
+            .get("delta")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
     }
     None
 }
@@ -485,12 +501,13 @@ fn extract_usage(value: &Value) -> Option<UsageSummary> {
         .get("completion_tokens")
         .and_then(|v| v.as_i64())
         .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()));
-    let total_tokens = usage.get("total_tokens").and_then(|v| v.as_i64()).or_else(|| {
-        match (prompt_tokens, completion_tokens) {
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_i64())
+        .or_else(|| match (prompt_tokens, completion_tokens) {
             (Some(prompt), Some(completion)) => Some(prompt + completion),
             _ => None,
-        }
-    });
+        });
     Some(UsageSummary {
         prompt_tokens,
         completion_tokens,

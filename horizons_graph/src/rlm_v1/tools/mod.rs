@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::schema::{submit_answer_schema, ResolvedAnswerSchema};
+use super::schema::{ResolvedAnswerSchema, submit_answer_schema};
 
 pub mod builtin;
+pub mod python_sandbox;
 
 pub type ToolSchema = Value;
 
@@ -24,8 +25,11 @@ pub fn build_tool_registry(
     let mut tools = Vec::new();
     let mut allowed_names = HashSet::new();
     let filter_set: Option<HashSet<String>> = filter.map(|items| items.iter().cloned().collect());
-    let allowed_caps: HashSet<String> =
-        allowed_capabilities.unwrap_or(&[]).iter().cloned().collect();
+    let allowed_caps: HashSet<String> = allowed_capabilities
+        .unwrap_or(&[])
+        .iter()
+        .cloned()
+        .collect();
 
     for tool in builtin::builtin_tools() {
         let name = tool
@@ -42,7 +46,9 @@ pub fn build_tool_registry(
         let is_control_tool = name == "give_up";
         if !allowed_caps.is_empty()
             && !is_control_tool
-            && !tool_capabilities_for(&name).iter().all(|cap| allowed_caps.contains(*cap))
+            && !tool_capabilities_for(&name)
+                .iter()
+                .all(|cap| allowed_caps.contains(*cap))
         {
             continue;
         }
@@ -73,6 +79,7 @@ pub fn tool_denied_result(tool_name: &str, allowed_tool_names: &HashSet<String>)
 fn tool_capabilities_for(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
         "materialize_context" | "local_grep" | "local_search" | "view_lines" => &["filesystem"],
+        "exec_python" => &["compute"],
         "codex_exec" => &["shell"],
         "query_lm" | "delegate_lm" => &["delegate"],
         _ => &[],

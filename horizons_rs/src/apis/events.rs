@@ -93,9 +93,17 @@ impl EventsApi {
         };
         let v = self
             .client
-            .request_value(Method::POST, "/api/v1/events/publish", None::<&()>, Some(&body))
+            .request_value(
+                Method::POST,
+                "/api/v1/events/publish",
+                None::<&()>,
+                Some(&body),
+            )
             .await?;
-        Ok(v.get("event_id").and_then(|x| x.as_str()).unwrap_or("").to_string())
+        Ok(v.get("event_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string())
     }
 
     pub async fn subscribe(
@@ -125,9 +133,16 @@ impl EventsApi {
         };
         let v = self
             .client
-            .request_value(Method::POST, "/api/v1/subscriptions", None::<&()>, Some(&body))
+            .request_value(
+                Method::POST,
+                "/api/v1/subscriptions",
+                None::<&()>,
+                Some(&body),
+            )
             .await?;
-        Ok(v.get("subscription_id").and_then(|x| x.as_str()).unwrap_or("").to_string())
+        Ok(v.get("subscription_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string())
     }
 }
-

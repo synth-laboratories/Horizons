@@ -99,4 +99,3 @@ pub enum StepStatus {
     Failed,
     Skipped,
 }
-

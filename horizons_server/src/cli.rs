@@ -44,4 +44,3 @@ pub enum Commands {
     /// Health check configured backends.
     Check,
 }
-

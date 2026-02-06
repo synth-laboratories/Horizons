@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="780" viewBox="0 0 960 780">
+<rect width="100%" height="100%" fill="#F5F5F5"/>
+<text x="480" y="40" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="32" font-weight="700" text-anchor="middle" dominant-baseline="central">Horizons</text>
+<text x="480" y="66" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">The Open Source Agent Platform</text>
+<text x="92" y="106" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" text-anchor="end" dominant-baseline="central">Interfaces  →</text>
+<rect x="100" y="80" width="242.66666666666666" height="52" rx="12" fill="#FFF0EA" stroke="#E8590C" stroke-width="1.5"/>
+<text x="221.33333333333331" y="106" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="central">Rust SDK</text>
+<rect x="358.66666666666663" y="80" width="242.66666666666666" height="52" rx="12" fill="#FFF0EA" stroke="#E8590C" stroke-width="1.5"/>
+<text x="479.99999999999994" y="106" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="central">Python SDK</text>
+<rect x="617.3333333333333" y="80" width="242.66666666666666" height="52" rx="12" fill="#FFF0EA" stroke="#E8590C" stroke-width="1.5"/>
+<text x="738.6666666666666" y="106" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="central">TypeScript SDK</text>
+<text x="92" y="174" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" text-anchor="end" dominant-baseline="central">Agents  →</text>
+<rect x="100" y="148" width="242.66666666666666" height="52" rx="12" fill="#EFEFEF" stroke="#DDDAD7" stroke-width="1.5"/>
+<text x="221.33333333333331" y="174" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle" dominant-baseline="central">Your Agents</text>
+<rect x="358.66666666666663" y="148" width="242.66666666666666" height="52" rx="12" fill="#EFEFEF" stroke="#DDDAD7" stroke-width="1.5"/>
+<text x="479.99999999999994" y="174" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle" dominant-baseline="central">Codex · Claude · OpenCode</text>
+<rect x="617.3333333333333" y="148" width="242.66666666666666" height="52" rx="12" fill="#EFEFEF" stroke="#DDDAD7" stroke-width="1.5"/>
+<text x="738.6666666666666" y="174" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle" dominant-baseline="central">Third-Party Agents</text>
+<rect x="100" y="228" width="760" height="64" rx="12" fill="#FFF5F0" stroke="#E8B8A0" stroke-width="1.5"/>
+<text x="480" y="251.04" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Agent Execution</text>
+<text x="480" y="271.52" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" text-anchor="middle" dominant-baseline="central">Sandbox runtime  ·  MCP tools  ·  Voyager memory  ·  action approvals</text>
+<rect x="100" y="304" width="760" height="64" rx="12" fill="#FFF5F0" stroke="#E8B8A0" stroke-width="1.5"/>
+<text x="480" y="327.04" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Business Context</text>
+<text x="480" y="347.52" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" text-anchor="middle" dominant-baseline="central">Context Refresh  ·  graph engine  ·  on-board storage</text>
+<rect x="100" y="380" width="760" height="64" rx="12" fill="#E8590C" stroke="#E8590C" stroke-width="0"/>
+<text x="480" y="403.04" fill="#FFFFFF" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Evaluation, Optimization &amp; Continual Learning</text>
+<text x="480" y="423.52" fill="rgba(255,255,255,0.75)" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" text-anchor="middle" dominant-baseline="central">RLM scoring  ·  MIPRO prompt optimization  ·  GEPA reflective evolution</text>
+<rect x="100" y="456" width="760" height="64" rx="12" fill="#FFF5F0" stroke="#E8B8A0" stroke-width="1.5"/>
+<text x="480" y="479.04" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Event Sync</text>
+<text x="480" y="499.52" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" text-anchor="middle" dominant-baseline="central">Bidirectional pub/sub  ·  routing  ·  retries  ·  replay  ·  DLQ</text>
+<line x1="100" y1="540" x2="860" y2="540" stroke="#D0D0D0" stroke-width="1" stroke-dasharray="6 4"/>
+<text x="480" y="552" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" text-anchor="middle" dominant-baseline="central">Horizons sits as a sidecar to your backend</text>
+<rect x="100" y="564" width="760" height="56" rx="12" fill="#EFEFEF" stroke="#D0D0D0" stroke-width="1"/>
+<text x="480" y="586" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Your Backend</text>
+<text x="480" y="606" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" text-anchor="middle" dominant-baseline="central">Business logic  ·  APIs  ·  databases  ·  auth</text>
+<rect x="310" y="644" width="340" height="48" rx="12" fill="#EFEFEF" stroke="#DDDAD7" stroke-width="1.5"/>
+<text x="480" y="662" fill="#1A1A1A" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle" dominant-baseline="central">Your Systems of Record</text>
+<text x="480" y="680" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" text-anchor="middle" dominant-baseline="central">Gmail  ·  CRM  ·  GitHub  ·  Jira  ·  S3</text>
+<path d="M 872 148 L 876 148 L 876 444 L 872 444" fill="none" stroke="#C0C0C0" stroke-width="1"/>
+<text x="886" y="160" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" text-anchor="start" dominant-baseline="central">Tenant isolation,</text>
+<text x="886" y="175" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" text-anchor="start" dominant-baseline="central">approval gates,</text>
+<text x="886" y="190" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" text-anchor="start" dominant-baseline="central">audit trail, ACLs</text>
+<text x="886" y="220" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="start" dominant-baseline="central">designed for</text>
+<text x="886" y="235" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="start" dominant-baseline="central">governed and</text>
+<text x="886" y="250" fill="#6B6B6B" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="start" dominant-baseline="central">regulated work</text>
+</svg>

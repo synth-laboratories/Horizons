@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn builtin_tools() -> Vec<Value> {
     vec![
@@ -68,6 +68,27 @@ pub fn builtin_tools() -> Vec<Value> {
                         "max_lines": {"type": "integer", "description": "Number of lines to return (default 50, max 100)"}
                     },
                     "required": ["file"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "exec_python",
+                "description": "Execute Python code in a sandboxed interpreter. The `context` variable contains the default materialized data, and `files` contains all materialized files (filename -> content). Variables persist across calls within one run. Use print() for output. No filesystem or network access.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Python code to execute"
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "description": "Max execution time in ms (default 5000)"
+                        }
+                    },
+                    "required": ["code"]
                 }
             }
         }),

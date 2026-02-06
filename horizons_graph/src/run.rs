@@ -40,4 +40,3 @@ pub struct OutputConfig {
     pub strict: Option<bool>,
     pub extract_from: Option<Vec<String>>,
 }
-

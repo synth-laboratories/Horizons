@@ -41,7 +41,10 @@ pub fn truncate_text(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let truncate_at = text.char_indices().nth(max_chars).map_or(text.len(), |(idx, _)| idx);
+    let truncate_at = text
+        .char_indices()
+        .nth(max_chars)
+        .map_or(text.len(), |(idx, _)| idx);
     format!("{}... (truncated)", &text[..truncate_at])
 }
 
@@ -49,7 +52,9 @@ pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
     let mut chars = 0usize;
     for msg in messages {
         if let Some(content) = msg.get("content") {
-            chars += content.as_str().map_or_else(|| content.to_string().len(), |s| s.len());
+            chars += content
+                .as_str()
+                .map_or_else(|| content.to_string().len(), |s| s.len());
         }
         if let Some(tool_calls) = msg.get("tool_calls") {
             chars += tool_calls.to_string().len();

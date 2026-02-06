@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResolvedAnswerSchema {
@@ -55,7 +55,12 @@ pub fn submit_answer_schema(
         let required = schema
             .get("required")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default();
         let description = if required.is_empty() {
             "Submit your final structured answer.".to_string()

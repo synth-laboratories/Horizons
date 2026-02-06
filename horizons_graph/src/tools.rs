@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 use regex::RegexBuilder;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::error::{GraphError, Result};
+
+#[cfg(feature = "rlm_v1")]
+use crate::rlm_v1::tools::python_sandbox::MontyREPL;
 
 /// Materialized file stored in memory for local tool operations
 #[derive(Clone, Debug)]
@@ -20,12 +23,20 @@ pub struct MaterializedFile {
 pub struct LocalToolState {
     /// Materialized files: filename -> content
     materialized: HashMap<String, MaterializedFile>,
+
+    /// Persistent per-run state for `exec_python` (RLM v1 tool).
+    ///
+    /// Lazy-initialized on the first call.
+    #[cfg(feature = "rlm_v1")]
+    python_repl: Option<MontyREPL>,
 }
 
 impl LocalToolState {
     pub fn new() -> Self {
         Self {
             materialized: HashMap::new(),
+            #[cfg(feature = "rlm_v1")]
+            python_repl: None,
         }
     }
 
@@ -121,8 +132,11 @@ impl DefaultToolExecutor {
             "local_regex" => self.local_regex(args, local_state).await,
             "view_lines" => self.view_lines(args, local_state, graph_inputs).await,
             "materialize_context" => {
-                self.materialize_context(args, local_state, graph_inputs).await
+                self.materialize_context(args, local_state, graph_inputs)
+                    .await
             }
+            #[cfg(feature = "rlm_v1")]
+            "exec_python" => self.exec_python(args, local_state, graph_inputs).await,
             // =====================================================================
             // TOOLS THAT GO TO PYTHON BACKEND (via execute_remote):
             // =====================================================================
@@ -165,7 +179,10 @@ impl DefaultToolExecutor {
             .map_err(|err| GraphError::internal(format!("tool executor request failed: {err}")))?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
             return Err(GraphError::internal(format!(
                 "tool executor failed ({status}): {body}"
             )));
@@ -190,13 +207,18 @@ impl DefaultToolExecutor {
         local_state: Option<&SharedLocalToolState>,
         graph_inputs: Option<&Value>,
     ) -> Result<Value> {
-        let state =
-            local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
+        let state = local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
         let inputs =
             graph_inputs.ok_or_else(|| GraphError::internal("graph inputs not available"))?;
 
-        let field_name = args.get("field_name").and_then(|v| v.as_str()).unwrap_or("context");
-        let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("context.txt");
+        let field_name = args
+            .get("field_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("context");
+        let filename = args
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or("context.txt");
 
         // Get content from graph inputs
         let raw_content = inputs.get(field_name);
@@ -233,6 +255,57 @@ impl DefaultToolExecutor {
         }))
     }
 
+    /// Execute Python code in-process via Monty (RLM v1 tool).
+    #[cfg(feature = "rlm_v1")]
+    async fn exec_python(
+        &self,
+        args: &Value,
+        local_state: Option<&SharedLocalToolState>,
+        graph_inputs: Option<&Value>,
+    ) -> Result<Value> {
+        let state = local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
+        let code = args
+            .get("code")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GraphError::bad_request("exec_python: missing 'code' parameter"))?;
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5000);
+
+        let mut state_guard = state.write().await;
+
+        if state_guard.python_repl.is_none() {
+            let mut repl = MontyREPL::new();
+            inject_contexts_into_repl(&mut repl, &state_guard.materialized, graph_inputs);
+            state_guard.python_repl = Some(repl);
+        }
+
+        // Temporarily take ownership of the REPL so we can read other state fields
+        // (like `materialized`) without borrow conflicts.
+        let repl_opt = state_guard.python_repl.take();
+        let mut repl = repl_opt.expect("python_repl just initialized");
+
+        // Re-inject contexts each call (materialized files can be added mid-run).
+        inject_contexts_into_repl(&mut repl, &state_guard.materialized, graph_inputs);
+
+        let exec_res = repl.execute(code, timeout_ms).await;
+        state_guard.python_repl = Some(repl);
+        let success = exec_res.error.is_none();
+
+        Ok(json!({
+            "success": success,
+            "stdout": exec_res.stdout,
+            "return_value": exec_res.return_value,
+            "error": exec_res.error,
+            "execution_time_ms": exec_res.execution_time_ms,
+            "variables": exec_res.variables,
+            "_local": true,
+            "_rust": true,
+            "_sandbox": "monty",
+        }))
+    }
+
     /// View a window of lines from a materialized file - pure Rust
     async fn view_lines(
         &self,
@@ -240,8 +313,7 @@ impl DefaultToolExecutor {
         local_state: Option<&SharedLocalToolState>,
         graph_inputs: Option<&Value>,
     ) -> Result<Value> {
-        let state =
-            local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
+        let state = local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
 
         let filename = args
             .get("file")
@@ -249,8 +321,11 @@ impl DefaultToolExecutor {
             .and_then(|v| v.as_str())
             .unwrap_or("context.txt");
         let start_line = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-        let max_lines =
-            args.get("max_lines").and_then(|v| v.as_u64()).unwrap_or(50).min(100) as usize;
+        let max_lines = args
+            .get("max_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .min(100) as usize;
 
         let start_line = start_line.max(1);
 
@@ -366,17 +441,29 @@ impl DefaultToolExecutor {
         args: &Value,
         local_state: Option<&SharedLocalToolState>,
     ) -> Result<Value> {
-        let state =
-            local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
+        let state = local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
 
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-        let filename = args.get("file").and_then(|v| v.as_str()).unwrap_or("context.txt");
-        let case_insensitive = args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(true);
-        let max_matches = args.get("max_matches").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
-        let max_line_chars =
-            args.get("max_line_chars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
-        let context_lines =
-            args.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let filename = args
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("context.txt");
+        let case_insensitive = args
+            .get("ignore_case")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let max_matches = args
+            .get("max_matches")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(15) as usize;
+        let max_line_chars = args
+            .get("max_line_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200) as usize;
+        let context_lines = args
+            .get("context_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let state = state.read().await;
@@ -393,7 +480,10 @@ impl DefaultToolExecutor {
         };
 
         // Compile regex
-        let regex = match RegexBuilder::new(pattern).case_insensitive(case_insensitive).build() {
+        let regex = match RegexBuilder::new(pattern)
+            .case_insensitive(case_insensitive)
+            .build()
+        {
             Ok(r) => r,
             Err(e) => {
                 return Ok(json!({
@@ -466,15 +556,25 @@ impl DefaultToolExecutor {
         args: &Value,
         local_state: Option<&SharedLocalToolState>,
     ) -> Result<Value> {
-        let state =
-            local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
+        let state = local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
 
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        let filename = args.get("file").and_then(|v| v.as_str()).unwrap_or("context.txt");
-        let case_insensitive = args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(true);
-        let max_matches = args.get("max_matches").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
-        let max_line_chars =
-            args.get("max_line_chars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        let filename = args
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("context.txt");
+        let case_insensitive = args
+            .get("ignore_case")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let max_matches = args
+            .get("max_matches")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(15) as usize;
+        let max_line_chars = args
+            .get("max_line_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200) as usize;
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let state = state.read().await;
@@ -550,14 +650,18 @@ impl DefaultToolExecutor {
         args: &Value,
         local_state: Option<&SharedLocalToolState>,
     ) -> Result<Value> {
-        let state =
-            local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
+        let state = local_state.ok_or_else(|| GraphError::internal("local state not available"))?;
 
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-        let filename = args.get("file").and_then(|v| v.as_str()).unwrap_or("context.txt");
+        let filename = args
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("context.txt");
         let flags_str = args.get("flags").and_then(|v| v.as_str()).unwrap_or("i");
-        let max_match_chars =
-            args.get("max_match_chars").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+        let max_match_chars = args
+            .get("max_match_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(500) as usize;
 
         let state = state.read().await;
         let mat_file = match state.get_file(filename) {
@@ -609,7 +713,10 @@ impl DefaultToolExecutor {
             // Add capture groups if any
             if cap.len() > 1 {
                 let groups: Vec<Option<String>> = (1..cap.len())
-                    .map(|i| cap.get(i).map(|m| truncate_str(m.as_str(), max_match_chars)))
+                    .map(|i| {
+                        cap.get(i)
+                            .map(|m| truncate_str(m.as_str(), max_match_chars))
+                    })
                     .collect();
                 match_info["groups"] = json!(groups);
             }
@@ -660,5 +767,57 @@ impl ToolExecutor for DefaultToolExecutor {
     ) -> Result<Value> {
         self.execute_impl(tool_name, args, context, local_state, graph_inputs)
             .await
+    }
+}
+
+#[cfg(feature = "rlm_v1")]
+fn inject_contexts_into_repl(
+    repl: &mut MontyREPL,
+    materialized: &HashMap<String, MaterializedFile>,
+    graph_inputs: Option<&Value>,
+) {
+    // All materialized files are available via `files` in the sandbox.
+    for (filename, mat_file) in materialized {
+        repl.inject_context(filename, mat_file.content.clone());
+    }
+
+    // Choose default `context` with a stable preference order.
+    let mut preferred: Option<String> = None;
+    for mf in materialized.values() {
+        if mf.field_name == "context" {
+            preferred = Some(mf.content.clone());
+            break;
+        }
+    }
+    if preferred.is_none() {
+        if let Some(mf) = materialized.get("context.txt") {
+            preferred = Some(mf.content.clone());
+        }
+    }
+    if preferred.is_none() && !materialized.is_empty() {
+        let mut filenames = materialized.keys().cloned().collect::<Vec<_>>();
+        filenames.sort();
+        if let Some(first) = filenames.first() {
+            if let Some(mf) = materialized.get(first) {
+                preferred = Some(mf.content.clone());
+            }
+        }
+    }
+    if preferred.is_none() {
+        if let Some(inputs) = graph_inputs {
+            if let Some(v) = inputs.get("context") {
+                preferred = Some(match v {
+                    Value::String(s) => s.clone(),
+                    Value::Object(_) | Value::Array(_) => {
+                        serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+                    }
+                    other => other.to_string(),
+                });
+            }
+        }
+    }
+
+    if let Some(content) = preferred {
+        repl.inject_context("context", content);
     }
 }

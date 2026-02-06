@@ -1,13 +1,17 @@
+use crate::Result;
 use crate::models::AgentIdentity;
 use crate::pipelines::models::{PipelineRun, PipelineSpec};
-use crate::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
 #[async_trait]
 pub trait PipelineRunner: Send + Sync {
-    async fn run(&self, spec: &PipelineSpec, inputs: Value, identity: &AgentIdentity)
-        -> Result<PipelineRun>;
+    async fn run(
+        &self,
+        spec: &PipelineSpec,
+        inputs: Value,
+        identity: &AgentIdentity,
+    ) -> Result<PipelineRun>;
 
     async fn get_run(&self, run_id: &str) -> Result<Option<PipelineRun>>;
 

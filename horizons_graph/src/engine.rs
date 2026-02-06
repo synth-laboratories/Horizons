@@ -1,9 +1,9 @@
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,7 +11,9 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::definition::{GraphDefinition, MapConfig, NodeDefinition, ReduceConfig};
 use crate::error::{GraphError, Result};
-use crate::ir::{canonicalize_graph_ir, normalize_graph_ir, validate_graph_ir, GraphIr, Strictness};
+use crate::ir::{
+    GraphIr, Strictness, canonicalize_graph_ir, normalize_graph_ir, validate_graph_ir,
+};
 use crate::llm::{ApiMode, LlmChunkCallback, LlmClientApi, LlmRequest, UsageSummary};
 use crate::mapping::eval_mapping_expression;
 use crate::python;
@@ -153,12 +155,9 @@ impl GraphEngine {
 
             if let Some(edges) = graph.control_edges.get(&node_id) {
                 for edge in edges {
-                    let passed = evaluate_edge_condition(
-                        edge.condition.as_ref(),
-                        &exec_state,
-                        &node_output,
-                    )
-                    .await?;
+                    let passed =
+                        evaluate_edge_condition(edge.condition.as_ref(), &exec_state, &node_output)
+                            .await?;
                     if passed {
                         activated.insert(edge.target.clone());
                     }
@@ -272,19 +271,26 @@ impl GraphEngine {
                 let model_name = impl_obj
                     .get("model_name")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| GraphError::bad_request("template_transform missing model_name"))?
+                    .ok_or_else(|| {
+                        GraphError::bad_request("template_transform missing model_name")
+                    })?
                     .to_string();
-                let temperature = impl_obj.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let temperature = impl_obj
+                    .get("temperature")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 let max_tokens = impl_obj.get("max_tokens").and_then(|v| v.as_i64());
-                let sequence = impl_obj
-                    .get("sequence")
-                    .ok_or_else(|| GraphError::bad_request("template_transform missing sequence"))?;
-                let messages =
-                    render_messages(sequence, inputs).map_err(|err| GraphError::bad_request(err.0))?;
+                let sequence = impl_obj.get("sequence").ok_or_else(|| {
+                    GraphError::bad_request("template_transform missing sequence")
+                })?;
+                let messages = render_messages(sequence, inputs)
+                    .map_err(|err| GraphError::bad_request(err.0))?;
 
                 let mut endpoint = crate::llm::resolve_endpoint(&model_name, Some(impl_value))?;
                 endpoint.mode = ApiMode::ChatCompletions;
-                let stream = run_config.and_then(|cfg| cfg.stream_completions).unwrap_or(false);
+                let stream = run_config
+                    .and_then(|cfg| cfg.stream_completions)
+                    .unwrap_or(false);
                 let response_format = impl_obj.get("response_format").cloned();
 
                 let request = LlmRequest {
@@ -302,7 +308,12 @@ impl GraphEngine {
 
                 {
                     let mut trace = trace_handle.lock().await;
-                    trace.record_llm_prompt(&node.name, &model_name, 1, summarize_messages_for_trace(&messages));
+                    trace.record_llm_prompt(
+                        &node.name,
+                        &model_name,
+                        1,
+                        summarize_messages_for_trace(&messages),
+                    );
                 }
 
                 let on_chunk: Option<LlmChunkCallback> = None;
@@ -372,12 +383,26 @@ impl GraphEngine {
                     "node": node.name,
                 });
                 self.tools
-                    .execute(tool_name, &Value::Object(args), &context, None, Some(graph_inputs))
+                    .execute(
+                        tool_name,
+                        &Value::Object(args),
+                        &context,
+                        None,
+                        Some(graph_inputs),
+                    )
                     .await
             }
             "rlm_compute" => {
-                self.execute_rlm_v1(node, inputs, impl_value, impl_obj, usage, trace_handle, graph_inputs)
-                    .await
+                self.execute_rlm_v1(
+                    node,
+                    inputs,
+                    impl_value,
+                    impl_obj,
+                    usage,
+                    trace_handle,
+                    graph_inputs,
+                )
+                .await
             }
             other => Err(GraphError::bad_request(format!(
                 "unsupported implementation type '{other}'"
@@ -429,7 +454,10 @@ impl GraphEngine {
         let inputs_obj = inputs
             .as_object()
             .ok_or_else(|| GraphError::bad_request("MapNode inputs must be an object"))?;
-        let items_value = inputs_obj.get("items").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        let items_value = inputs_obj
+            .get("items")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
         let items = items_value
             .as_array()
             .ok_or_else(|| GraphError::bad_request("MapNode expected items to be a list"))?;
@@ -446,7 +474,10 @@ impl GraphEngine {
             result.insert(format!("{}_outputs", node.name), Value::Array(Vec::new()));
             result.insert(format!("{}_errors", node.name), Value::Array(Vec::new()));
             result.insert(format!("{}_count", node.name), Value::Number(0.into()));
-            result.insert(format!("{}_success_count", node.name), Value::Number(0.into()));
+            result.insert(
+                format!("{}_success_count", node.name),
+                Value::Number(0.into()),
+            );
             return Ok(Value::Object(result));
         }
 
@@ -510,9 +541,10 @@ impl GraphEngine {
                 )
                 .await;
                 match result {
-                    Ok(Ok(output)) => Ok::<(usize, Value, Option<Value>, UsageAccumulator), GraphError>(
-                        (idx, output, None, local_usage),
-                    ),
+                    Ok(Ok(output)) => Ok::<
+                        (usize, Value, Option<Value>, UsageAccumulator),
+                        GraphError,
+                    >((idx, output, None, local_usage)),
                     Ok(Err(err)) => Ok((
                         idx,
                         Value::Null,
@@ -565,7 +597,10 @@ impl GraphEngine {
         let mut result = Map::new();
         result.insert(format!("{}_outputs", node.name), Value::Array(outputs));
         result.insert(format!("{}_errors", node.name), Value::Array(errors));
-        result.insert(format!("{}_count", node.name), Value::Number((items.len() as i64).into()));
+        result.insert(
+            format!("{}_count", node.name),
+            Value::Number((items.len() as i64).into()),
+        );
         result.insert(
             format!("{}_success_count", node.name),
             Value::Number((success_count as i64).into()),
@@ -587,7 +622,10 @@ impl GraphEngine {
         let inputs_obj = inputs
             .as_object()
             .ok_or_else(|| GraphError::bad_request("ReduceNode inputs must be an object"))?;
-        let results_value = inputs_obj.get("results").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        let results_value = inputs_obj
+            .get("results")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
         let results = results_value
             .as_array()
             .ok_or_else(|| GraphError::bad_request("ReduceNode expected results to be a list"))?;
@@ -595,10 +633,9 @@ impl GraphEngine {
         check_reduce_success_threshold(results, config)?;
 
         let output = if config.reduce_strategy.as_deref() == Some("llm") {
-            let inner_node = node
-                .inner_node
-                .as_ref()
-                .ok_or_else(|| GraphError::bad_request("ReduceNode llm strategy requires inner_node"))?;
+            let inner_node = node.inner_node.as_ref().ok_or_else(|| {
+                GraphError::bad_request("ReduceNode llm strategy requires inner_node")
+            })?;
             let mut inner_state = full_state.as_object().cloned().unwrap_or_default();
             let results_key = config
                 .results_key
@@ -698,7 +735,10 @@ impl GraphEngine {
             .and_then(|v| v.as_i64())
             .map(|v| v as usize);
 
-        let is_verifier = impl_obj.get("is_verifier").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_verifier = impl_obj
+            .get("is_verifier")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let raw_answer_schema = impl_obj.get("answer_schema").cloned();
 
         let system_prompt = impl_obj
@@ -767,13 +807,14 @@ impl GraphEngine {
             }
         }
 
-        let rendered_system_prompt = render_rlm_prompt(Some(&system_prompt), inputs, &materialized_inputs);
+        let rendered_system_prompt =
+            render_rlm_prompt(Some(&system_prompt), inputs, &materialized_inputs);
         let rendered_user_prompt = render_rlm_prompt(user_prompt, inputs, &materialized_inputs);
 
         let mut messages = vec![json!({"role": "system", "content": rendered_system_prompt})];
         if !materialized_inputs.is_empty() {
             let mut notice = String::from(
-                "Large inputs have been materialized to files. Use local_grep/local_search/codex_exec for inspection.\n",
+                "Large inputs have been materialized to files. Use local_grep/local_search/view_lines/exec_python/codex_exec for inspection.\n",
             );
             for (field, filename) in &materialized_inputs {
                 notice.push_str(&format!("- {field}: {filename}\n"));
@@ -800,7 +841,10 @@ impl GraphEngine {
         let run_request = crate::rlm_v1::RlmRunRequest {
             messages_seed: messages,
             inputs: inputs.clone(),
-            query: inputs.get("query").and_then(|v| v.as_str()).map(|v| v.to_string()),
+            query: inputs
+                .get("query")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
             is_verifier,
             answer_schema: raw_answer_schema,
             limits,
@@ -819,10 +863,9 @@ impl GraphEngine {
             event_sink: None,
         };
 
-        let mut result =
-            crate::rlm_v1::run_rlm(run_request, &lm_client, &tool_executor, run_ctx)
-                .await
-                .map_err(|err| GraphError::internal(format!("rlm v1 failed: {err}")))?;
+        let mut result = crate::rlm_v1::run_rlm(run_request, &lm_client, &tool_executor, run_ctx)
+            .await
+            .map_err(|err| GraphError::internal(format!("rlm v1 failed: {err}")))?;
 
         {
             let mut guard = usage_handle.lock().await;
@@ -917,11 +960,9 @@ impl crate::rlm_v1::LmClient for GraphLmClient {
         &self,
         req: crate::rlm_v1::LmRequest,
     ) -> std::result::Result<crate::rlm_v1::LmResponse, crate::rlm_v1::LmError> {
-        let mut endpoint =
-            crate::llm::resolve_endpoint(&req.model, Some(&self.impl_value)).map_err(|e| {
-                crate::rlm_v1::LmError {
-                    message: e.to_string(),
-                }
+        let mut endpoint = crate::llm::resolve_endpoint(&req.model, Some(&self.impl_value))
+            .map_err(|e| crate::rlm_v1::LmError {
+                message: e.to_string(),
             })?;
         endpoint.mode = ApiMode::ChatCompletions;
 
@@ -940,20 +981,31 @@ impl crate::rlm_v1::LmClient for GraphLmClient {
 
         {
             let mut trace = self.trace.lock().await;
-            trace.record_llm_prompt(&self.node_name, &req.model, 1, summarize_messages_for_trace(&request.messages));
+            trace.record_llm_prompt(
+                &self.node_name,
+                &req.model,
+                1,
+                summarize_messages_for_trace(&request.messages),
+            );
         }
 
         let llm_timer = Instant::now();
-        let response = self.llm.send(&request, None).await.map_err(|e| crate::rlm_v1::LmError {
-            message: e.to_string(),
-        })?;
+        let response = self
+            .llm
+            .send(&request, None)
+            .await
+            .map_err(|e| crate::rlm_v1::LmError {
+                message: e.to_string(),
+            })?;
         let llm_elapsed_ms = llm_timer.elapsed().as_millis() as i64;
 
         {
             let mut usage = self.usage.lock().await;
-            usage.record(&req.model, &response.usage).map_err(|e| crate::rlm_v1::LmError {
-                message: e.to_string(),
-            })?;
+            usage
+                .record(&req.model, &response.usage)
+                .map_err(|e| crate::rlm_v1::LmError {
+                    message: e.to_string(),
+                })?;
         }
 
         let raw = response.raw.clone().unwrap_or(Value::Null);
@@ -1064,8 +1116,9 @@ impl crate::rlm_v1::ToolExecutor for GraphToolExecutor {
                 (idx, executor.execute(call, ctx).await)
             });
         }
-        let mut results: Vec<Option<std::result::Result<crate::rlm_v1::ToolResult, crate::rlm_v1::ToolError>>> =
-            (0..calls_len).map(|_| None).collect();
+        let mut results: Vec<
+            Option<std::result::Result<crate::rlm_v1::ToolResult, crate::rlm_v1::ToolError>>,
+        > = (0..calls_len).map(|_| None).collect();
         while let Some((idx, res)) = futures.next().await {
             results[idx] = Some(res);
         }
@@ -1108,7 +1161,7 @@ fn resolve_node_inputs(node: &NodeDefinition, state: &Value) -> Result<Value> {
             return Err(GraphError::bad_request(format!(
                 "input_mapping must be string or object, got {}",
                 other
-            )))
+            )));
         }
     };
 
@@ -1159,7 +1212,9 @@ fn extract_condition_source(condition: &Value) -> Result<String> {
             if let Some(text) = map.get("condition_str").and_then(|v| v.as_str()) {
                 return Ok(text.to_string());
             }
-            Err(GraphError::bad_request("edge condition object missing fn_str"))
+            Err(GraphError::bad_request(
+                "edge condition object missing fn_str",
+            ))
         }
         _ => Err(GraphError::bad_request(
             "edge condition must be string or object",
@@ -1238,7 +1293,7 @@ async fn apply_output_mapping(
             return Err(GraphError::bad_request(format!(
                 "output_mapping must be string or object, got {}",
                 other
-            )))
+            )));
         }
     }
 
@@ -1281,7 +1336,10 @@ fn build_in_degree(graph: &GraphDefinition) -> HashMap<String, i64> {
     in_degree
 }
 
-fn initial_ready_queue(graph: &GraphDefinition, in_degree: &HashMap<String, i64>) -> VecDeque<String> {
+fn initial_ready_queue(
+    graph: &GraphDefinition,
+    in_degree: &HashMap<String, i64>,
+) -> VecDeque<String> {
     if !graph.start_nodes.is_empty() {
         let mut seen = HashSet::new();
         let mut queue = VecDeque::new();
@@ -1301,7 +1359,11 @@ fn initial_ready_queue(graph: &GraphDefinition, in_degree: &HashMap<String, i64>
     queue
 }
 
-fn parse_llm_output(text: String, response_format: Option<&Value>, output_schema: Option<&Value>) -> Value {
+fn parse_llm_output(
+    text: String,
+    response_format: Option<&Value>,
+    output_schema: Option<&Value>,
+) -> Value {
     let wants_json = response_format.is_some() || output_schema.is_some();
     let trimmed = text.trim();
     if wants_json || trimmed.starts_with('{') || trimmed.starts_with('[') {
@@ -1321,7 +1383,11 @@ fn serialize_input_value(value: &Value) -> String {
 }
 
 fn infer_input_filename(field_name: &str, value: &Value) -> String {
-    let ext = if value.is_object() || value.is_array() { "json" } else { "txt" };
+    let ext = if value.is_object() || value.is_array() {
+        "json"
+    } else {
+        "txt"
+    };
     let sanitized = sanitize_filename(field_name);
     format!("{sanitized}.{ext}")
 }
@@ -1344,7 +1410,11 @@ fn sanitize_filename(value: &str) -> String {
     out
 }
 
-fn render_rlm_prompt(template: Option<&str>, inputs: &Value, materialized_inputs: &HashMap<String, String>) -> String {
+fn render_rlm_prompt(
+    template: Option<&str>,
+    inputs: &Value,
+    materialized_inputs: &HashMap<String, String>,
+) -> String {
     let Some(template) = template else {
         return inputs.to_string();
     };
@@ -1372,7 +1442,10 @@ fn summarize_messages_for_trace(messages: &[Value]) -> Vec<Value> {
             summarized.push(json!({"role": "unknown", "content": msg.to_string()}));
             continue;
         };
-        let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let role = obj
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let content_value = obj.get("content").cloned().unwrap_or(Value::Null);
         let content_text = if let Value::String(text) = content_value {
             text
@@ -1391,7 +1464,10 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let truncate_at = text.char_indices().nth(max_chars).map_or(text.len(), |(idx, _)| idx);
+    let truncate_at = text
+        .char_indices()
+        .nth(max_chars)
+        .map_or(text.len(), |(idx, _)| idx);
     format!("{}... (truncated)", &text[..truncate_at])
 }
 
@@ -1417,7 +1493,10 @@ fn extract_tool_calls_from_chat(raw: &Value) -> Vec<RlmToolCall> {
         return out;
     };
     for item in tool_calls {
-        let id = item.get("id").and_then(|v| v.as_str()).map(|v| v.to_string());
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
         let function = item.get("function").and_then(|v| v.as_object());
         let name = function
             .and_then(|f| f.get("name"))
@@ -1429,14 +1508,20 @@ fn extract_tool_calls_from_chat(raw: &Value) -> Vec<RlmToolCall> {
         if name.trim().is_empty() {
             continue;
         }
-        out.push(RlmToolCall { id, name, arguments });
+        out.push(RlmToolCall {
+            id,
+            name,
+            arguments,
+        });
     }
     out
 }
 
 fn parse_tool_call_args(value: Option<&Value>) -> Value {
     match value {
-        Some(Value::String(text)) => serde_json::from_str::<Value>(text).unwrap_or(Value::String(text.clone())),
+        Some(Value::String(text)) => {
+            serde_json::from_str::<Value>(text).unwrap_or(Value::String(text.clone()))
+        }
         Some(Value::Object(map)) => Value::Object(map.clone()),
         Some(Value::Array(items)) => Value::Array(items.clone()),
         Some(other) => other.clone(),
@@ -1445,7 +1530,10 @@ fn parse_tool_call_args(value: Option<&Value>) -> Value {
 }
 
 fn parse_tool_trace(result: &Value) -> (String, bool, Option<SandboxTiming>) {
-    let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    let success = result
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let is_local = result.get("_local").and_then(|v| v.as_bool());
     let execution_mode = match is_local {
         Some(true) => "local".to_string(),
@@ -1507,7 +1595,11 @@ fn check_reduce_success_threshold(results: &[Value], config: &ReduceConfig) -> R
     Ok(())
 }
 
-fn apply_reduce_strategy(strategy: &str, results: &[Value], value_key: Option<&str>) -> Result<Value> {
+fn apply_reduce_strategy(
+    strategy: &str,
+    results: &[Value],
+    value_key: Option<&str>,
+) -> Result<Value> {
     let valid: Vec<&Value> = results.iter().filter(|v| !v.is_null()).collect();
     match strategy {
         "count" => Ok(Value::Number((valid.len() as i64).into())),
@@ -1515,7 +1607,9 @@ fn apply_reduce_strategy(strategy: &str, results: &[Value], value_key: Option<&s
         "last" => Ok(valid.last().copied().cloned().unwrap_or(Value::Null)),
         "concat" | "mean" | "sum" | "max" | "min" => {
             let key = value_key.ok_or_else(|| {
-                GraphError::bad_request(format!("ReduceNode strategy '{strategy}' requires value_key"))
+                GraphError::bad_request(format!(
+                    "ReduceNode strategy '{strategy}' requires value_key"
+                ))
             })?;
             let mut values = Vec::new();
             for item in &valid {
@@ -1542,28 +1636,36 @@ fn apply_reduce_strategy(strategy: &str, results: &[Value], value_key: Option<&s
                         numbers.iter().sum::<f64>() / numbers.len() as f64
                     };
                     Ok(Value::Number(
-                        serde_json::Number::from_f64(avg).unwrap_or_else(|| serde_json::Number::from(0)),
+                        serde_json::Number::from_f64(avg)
+                            .unwrap_or_else(|| serde_json::Number::from(0)),
                     ))
                 }
                 "sum" => {
                     let total = numbers.iter().sum::<f64>();
                     Ok(Value::Number(
-                        serde_json::Number::from_f64(total).unwrap_or_else(|| serde_json::Number::from(0)),
+                        serde_json::Number::from_f64(total)
+                            .unwrap_or_else(|| serde_json::Number::from(0)),
                     ))
                 }
                 "max" => Ok(numbers
                     .iter()
                     .copied()
-                    .fold(None::<f64>, |acc, val| Some(acc.map_or(val, |cur| cur.max(val))))
+                    .fold(None::<f64>, |acc, val| {
+                        Some(acc.map_or(val, |cur| cur.max(val)))
+                    })
                     .and_then(serde_json::Number::from_f64)
                     .map_or(Value::Null, Value::Number)),
                 "min" => Ok(numbers
                     .iter()
                     .copied()
-                    .fold(None::<f64>, |acc, val| Some(acc.map_or(val, |cur| cur.min(val))))
+                    .fold(None::<f64>, |acc, val| {
+                        Some(acc.map_or(val, |cur| cur.min(val)))
+                    })
                     .and_then(serde_json::Number::from_f64)
                     .map_or(Value::Null, Value::Number)),
-                _ => Err(GraphError::bad_request(format!("Unsupported reduce strategy '{strategy}'"))),
+                _ => Err(GraphError::bad_request(format!(
+                    "Unsupported reduce strategy '{strategy}'"
+                ))),
             }
         }
         other => Err(GraphError::bad_request(format!(
@@ -1572,7 +1674,10 @@ fn apply_reduce_strategy(strategy: &str, results: &[Value], value_key: Option<&s
     }
 }
 
-fn apply_output_config(exec_state: &Value, run_config: Option<&RunConfig>) -> Result<(Value, Option<Value>, bool)> {
+fn apply_output_config(
+    exec_state: &Value,
+    run_config: Option<&RunConfig>,
+) -> Result<(Value, Option<Value>, bool)> {
     let Some(output_config) = run_config.and_then(|cfg| cfg.output_config.as_ref()) else {
         return Ok((exec_state.clone(), None, false));
     };
@@ -1610,13 +1715,23 @@ fn apply_output_config(exec_state: &Value, run_config: Option<&RunConfig>) -> Re
     Ok((output, Some(validation_result), validation_failed))
 }
 
-fn extract_output(exec_state: &Value, extract_from: &[String]) -> (Value, Option<String>, Vec<String>) {
+fn extract_output(
+    exec_state: &Value,
+    extract_from: &[String],
+) -> (Value, Option<String>, Vec<String>) {
     if extract_from.is_empty() {
         return (exec_state.clone(), Some("(root)".to_string()), Vec::new());
     }
 
     let Some(map) = exec_state.as_object() else {
-        return (Value::Null, None, vec![format!("Cannot extract output: expected object, got {}", value_type_name(exec_state))]);
+        return (
+            Value::Null,
+            None,
+            vec![format!(
+                "Cannot extract output: expected object, got {}",
+                value_type_name(exec_state)
+            )],
+        );
     };
 
     for path in extract_from {
@@ -1645,7 +1760,13 @@ fn extract_output(exec_state: &Value, extract_from: &[String]) -> (Value, Option
         }
     }
 
-    (Value::Null, None, vec![format!("Could not extract output. Tried paths: {extract_from:?}")])
+    (
+        Value::Null,
+        None,
+        vec![format!(
+            "Could not extract output. Tried paths: {extract_from:?}"
+        )],
+    )
 }
 
 fn value_type_name(value: &Value) -> &'static str {
@@ -1667,7 +1788,10 @@ fn validate_output_schema(schema: &Value, output: &Value) -> (bool, Vec<String>)
     let result = compiled.validate(output);
     match result {
         Ok(()) => (true, Vec::new()),
-        Err(errors) => (false, errors.map(|err| err.to_string()).collect::<Vec<String>>()),
+        Err(errors) => (
+            false,
+            errors.map(|err| err.to_string()).collect::<Vec<String>>(),
+        ),
     }
 }
 

@@ -151,14 +151,16 @@ where
 
 fn parse_number(raw: &str) -> Result<Value, EvalError> {
     if raw.contains('.') {
-        let value: f64 =
-            raw.parse().map_err(|_| EvalError(format!("invalid number literal '{raw}'")))?;
+        let value: f64 = raw
+            .parse()
+            .map_err(|_| EvalError(format!("invalid number literal '{raw}'")))?;
         let json = serde_json::Number::from_f64(value)
             .ok_or_else(|| EvalError(format!("invalid float literal '{raw}'")))?;
         Ok(Value::Number(json))
     } else {
-        let value: i64 =
-            raw.parse().map_err(|_| EvalError(format!("invalid number literal '{raw}'")))?;
+        let value: i64 = raw
+            .parse()
+            .map_err(|_| EvalError(format!("invalid number literal '{raw}'")))?;
         Ok(Value::Number(value.into()))
     }
 }
@@ -261,7 +263,7 @@ impl Parser {
                     return Err(EvalError(format!(
                         "expected string key in dict, got {:?}",
                         other
-                    )))
+                    )));
                 }
             };
             self.expect_token(&Token::Colon)?;
@@ -421,7 +423,9 @@ fn parse_string<I>(chars: &mut std::iter::Peekable<I>) -> Result<String, EvalErr
 where
     I: Iterator<Item = char>,
 {
-    let quote = chars.next().ok_or_else(|| EvalError("unterminated string".to_string()))?;
+    let quote = chars
+        .next()
+        .ok_or_else(|| EvalError("unterminated string".to_string()))?;
     let mut result = String::new();
     while let Some(ch) = chars.next() {
         if ch == quote {

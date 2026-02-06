@@ -61,4 +61,3 @@ impl EvaluationApi {
             .await
     }
 }
-

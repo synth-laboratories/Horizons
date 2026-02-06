@@ -40,4 +40,3 @@ impl From<serde_json::Error> for HorizonsError {
         HorizonsError::new(HorizonsErrorKind::Serialization, None, e.to_string())
     }
 }
-

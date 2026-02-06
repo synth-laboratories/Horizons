@@ -13,12 +13,12 @@ use horizons_core::memory::traits::HorizonsMemory;
 use horizons_core::onboard::traits::{
     Cache, CentralDb, Filestore, GraphStore, ProjectDb, VectorStore,
 };
-use horizons_graph::GraphEngine;
+#[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
+use horizons_core::optimization::continual::ContinualLearningEngine;
 #[cfg(feature = "optimization")]
 use horizons_core::optimization::engine::OptimizationEngine;
 use horizons_core::pipelines::traits::PipelineRunner;
-#[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
-use horizons_core::optimization::continual::ContinualLearningEngine;
+use horizons_graph::GraphEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;

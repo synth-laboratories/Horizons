@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use horizons_graph::ir::{
-    canonicalize_graph_ir, normalize_graph_ir, validate_graph_ir, GraphIr, Strictness,
-    GRAPH_IR_SCHEMA_VERSION,
+    GRAPH_IR_SCHEMA_VERSION, GraphIr, Strictness, canonicalize_graph_ir, normalize_graph_ir,
+    validate_graph_ir,
 };
 use horizons_graph::registry as graph_registry;
 
@@ -62,7 +62,10 @@ pub fn router() -> axum::Router {
         .route("/graph/normalize", post(normalize))
         .route("/graph/execute", post(execute))
         .route("/graph/registry", axum::routing::get(list_registry))
-        .route("/graph/registry/{graph_id}", axum::routing::get(get_registry_yaml))
+        .route(
+            "/graph/registry/{graph_id}",
+            axum::routing::get(get_registry_yaml),
+        )
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -234,16 +237,18 @@ fn resolve_graph_ir(
         yaml.to_string()
     } else {
         let id = graph_id.unwrap_or_default();
-        graph_registry::get_builtin_graph_yaml(id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(GraphErrorBody {
-                    error: format!("unknown built-in graph_id '{id}'"),
-                    diagnostics: None,
-                }),
-            )
-                .into_response()
-        })?.to_string()
+        graph_registry::get_builtin_graph_yaml(id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(GraphErrorBody {
+                        error: format!("unknown built-in graph_id '{id}'"),
+                        diagnostics: None,
+                    }),
+                )
+                    .into_response()
+            })?
+            .to_string()
     };
 
     let graph_value: serde_json::Value = serde_yaml::from_str(&yaml).map_err(|e| {
@@ -274,7 +279,11 @@ pub async fn validate(
     Extension(_state): Extension<Arc<AppState>>,
     Json(req): Json<GraphValidateRequest>,
 ) -> std::result::Result<Json<GraphValidateResponse>, Response> {
-    let graph_ir = resolve_graph_ir(req.graph_id.as_deref(), req.graph_ir, req.graph_yaml.as_deref())?;
+    let graph_ir = resolve_graph_ir(
+        req.graph_id.as_deref(),
+        req.graph_ir,
+        req.graph_yaml.as_deref(),
+    )?;
     let normalized = normalize_graph_ir(&graph_ir);
     let strictness = req.strictness.unwrap_or(Strictness::Strict);
     let validation = validate_graph_ir(&normalized, strictness);
@@ -291,7 +300,11 @@ pub async fn normalize(
     Extension(_state): Extension<Arc<AppState>>,
     Json(req): Json<GraphNormalizeRequest>,
 ) -> std::result::Result<Json<GraphNormalizeResponse>, Response> {
-    let graph_ir = resolve_graph_ir(req.graph_id.as_deref(), req.graph_ir, req.graph_yaml.as_deref())?;
+    let graph_ir = resolve_graph_ir(
+        req.graph_id.as_deref(),
+        req.graph_ir,
+        req.graph_yaml.as_deref(),
+    )?;
     let normalized = normalize_graph_ir(&graph_ir);
     let canonical = canonicalize_graph_ir(&normalized);
     Ok(Json(GraphNormalizeResponse {
@@ -306,7 +319,11 @@ pub async fn execute(
     Extension(state): Extension<Arc<AppState>>,
     Json(req): Json<GraphExecuteRequest>,
 ) -> std::result::Result<Json<GraphExecuteResponse>, Response> {
-    let graph_ir = resolve_graph_ir(req.graph_id.as_deref(), req.graph_ir, req.graph_yaml.as_deref())?;
+    let graph_ir = resolve_graph_ir(
+        req.graph_id.as_deref(),
+        req.graph_ir,
+        req.graph_yaml.as_deref(),
+    )?;
 
     // Include project scoping in graph inputs so context-ingestion pipelines and
     // remote tool executors can reliably key work to the right org/project.
@@ -317,8 +334,7 @@ pub async fn execute(
     });
     match inputs.as_object_mut() {
         Some(map) => {
-            map.entry("_horizons".to_string())
-                .or_insert(horizon_ctx);
+            map.entry("_horizons".to_string()).or_insert(horizon_ctx);
         }
         None => {
             inputs = serde_json::json!({
@@ -368,5 +384,7 @@ pub async fn get_registry_yaml(
             "unknown built-in graph_id '{graph_id}'"
         )))
     })?;
-    Ok(Json(serde_json::json!({ "graph_id": graph_id, "yaml": yaml })))
+    Ok(Json(
+        serde_json::json!({ "graph_id": graph_id, "yaml": yaml }),
+    ))
 }

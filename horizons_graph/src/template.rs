@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
 #[derive(Debug)]
@@ -62,15 +62,30 @@ fn render_template(template: &Value, inputs: &Value) -> Result<String, TemplateE
 
     for (field, data) in instructions {
         let placeholder = format!("<instruction>{field}</instruction>");
-        let replacement = data.get("content").and_then(|v| v.as_str()).unwrap_or_default();
+        let replacement = data
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         content = content.replace(&placeholder, replacement);
     }
 
     for (key, field_data) in input_fields {
-        let field_name = field_data.get("field_name").and_then(|v| v.as_str()).unwrap_or(&key);
-        let is_required = field_data.get("is_required").and_then(|v| v.as_bool()).unwrap_or(true);
-        let field_type = field_data.get("field_type").and_then(|v| v.as_str()).unwrap_or("text");
-        let value = inputs.as_object().and_then(|map| map.get(field_name)).cloned();
+        let field_name = field_data
+            .get("field_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&key);
+        let is_required = field_data
+            .get("is_required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let field_type = field_data
+            .get("field_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text");
+        let value = inputs
+            .as_object()
+            .and_then(|map| map.get(field_name))
+            .cloned();
         let rendered = if let Some(val) = value {
             stringify_value(&val, field_type)
         } else {
@@ -129,8 +144,13 @@ fn is_image_value(value: &Value) -> bool {
         Value::String(text) => looks_like_image(text),
         Value::Array(items) => items.iter().any(is_image_value),
         Value::Object(map) => {
-            map.get("url").and_then(|v| v.as_str()).is_some_and(looks_like_image)
-                || map.get("data_url").and_then(|v| v.as_str()).is_some_and(looks_like_image)
+            map.get("url")
+                .and_then(|v| v.as_str())
+                .is_some_and(looks_like_image)
+                || map
+                    .get("data_url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(looks_like_image)
         }
         _ => false,
     }
@@ -318,7 +338,11 @@ fn attach_images(messages: &mut [Value], images: Vec<String>) {
     }
     let mut target_index = messages.len().saturating_sub(1);
     for (idx, message) in messages.iter().enumerate() {
-        if message.get("role").and_then(|v| v.as_str()).is_some_and(|role| role == "user") {
+        if message
+            .get("role")
+            .and_then(|v| v.as_str())
+            .is_some_and(|role| role == "user")
+        {
             target_index = idx;
         }
     }
@@ -351,4 +375,3 @@ fn attach_images(messages: &mut [Value], images: Vec<String>) {
         }
     }
 }
-

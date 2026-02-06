@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -80,7 +80,9 @@ async fn run_python_subprocess(args: &Value) -> Result<Value> {
         } else {
             stderr.trim().to_string()
         };
-        return Err(GraphError::bad_request(format!("python execution failed: {msg}")));
+        return Err(GraphError::bad_request(format!(
+            "python execution failed: {msg}"
+        )));
     }
 
     serde_json::from_str::<Value>(stdout.trim()).map_err(|e| {
@@ -181,10 +183,7 @@ _results = {results_literal}
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| GraphError::bad_request("missing code"))?;
             let state = args_obj.get("state").cloned().unwrap_or(Value::Null);
-            let node_output = args_obj
-                .get("node_output")
-                .cloned()
-                .unwrap_or(Value::Null);
+            let node_output = args_obj.get("node_output").cloned().unwrap_or(Value::Null);
             let state_literal = to_python_literal(&state)?;
             let node_output_literal = to_python_literal(&node_output)?;
             // Return the value of the last expression (Monty behaves like a REPL for the final line).
@@ -205,10 +204,13 @@ node_output = {node_output_literal}
         }
     };
 
-    let runner =
-        MontyRun::new(code, script_name, Vec::<String>::new(), Vec::<String>::new()).map_err(
-            |err| GraphError::internal(format!("monty init failed: {err:?}")),
-        )?;
+    let runner = MontyRun::new(
+        code,
+        script_name,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .map_err(|err| GraphError::internal(format!("monty init failed: {err:?}")))?;
 
     let mut printer = StdPrint;
     let result = runner
@@ -283,7 +285,12 @@ node_output = {node_output_literal}
                 out.insert("type_id".to_string(), json!(type_id));
                 out.insert(
                     "field_names".to_string(),
-                    Value::Array(field_names.iter().map(|s| Value::String(s.clone())).collect()),
+                    Value::Array(
+                        field_names
+                            .iter()
+                            .map(|s| Value::String(s.clone()))
+                            .collect(),
+                    ),
                 );
                 out.insert("attrs".to_string(), dict_pairs_to_json_object(attrs)?);
                 out.insert(

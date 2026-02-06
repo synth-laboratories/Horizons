@@ -10,7 +10,7 @@ pub mod trace;
 pub use errors::{LmError, RlmErrorInfo, RlmErrorKind, RlmRunError, ToolError};
 pub use limits::RlmLimits;
 pub use output::{EvidenceItem, RlmRunResult, RlmStats};
-pub use runner::{run_rlm, RlmEventSink, RlmRunContext};
+pub use runner::{RlmEventSink, RlmRunContext, run_rlm};
 pub use schema::ResolvedAnswerSchema;
 pub use tools::{ToolCall, ToolContext, ToolExecutor, ToolResult, ToolSchema};
 pub use trace::{LmCallTrace, RlmExecutionTrace, ToolCallTrace, ToolResultTrace};

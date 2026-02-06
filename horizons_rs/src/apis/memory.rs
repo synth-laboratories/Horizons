@@ -68,7 +68,10 @@ impl MemoryApi {
             .client
             .request_value(Method::POST, "/api/v1/memory", None::<&()>, Some(&body))
             .await?;
-        Ok(v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string())
+        Ok(v.get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string())
     }
 
     pub async fn summarize(
@@ -86,8 +89,12 @@ impl MemoryApi {
             horizon: horizon.into(),
         };
         self.client
-            .request_json(Method::POST, "/api/v1/memory/summarize", None::<&()>, Some(&body))
+            .request_json(
+                Method::POST,
+                "/api/v1/memory/summarize",
+                None::<&()>,
+                Some(&body),
+            )
             .await
     }
 }
-

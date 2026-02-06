@@ -51,13 +51,23 @@ impl ActionsApi {
         };
         let v = self
             .client
-            .request_value(Method::POST, "/api/v1/actions/propose", None::<&()>, Some(&body))
+            .request_value(
+                Method::POST,
+                "/api/v1/actions/propose",
+                None::<&()>,
+                Some(&body),
+            )
             .await?;
-        let s = v
-            .get("action_id")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| crate::HorizonsError::new(crate::HorizonsErrorKind::Serialization, None, "missing action_id"))?;
-        Ok(Uuid::parse_str(s).map_err(|e| crate::HorizonsError::new(crate::HorizonsErrorKind::Serialization, None, e.to_string()))?)
+        let s = v.get("action_id").and_then(|x| x.as_str()).ok_or_else(|| {
+            crate::HorizonsError::new(
+                crate::HorizonsErrorKind::Serialization,
+                None,
+                "missing action_id",
+            )
+        })?;
+        Ok(Uuid::parse_str(s).map_err(|e| {
+            crate::HorizonsError::new(crate::HorizonsErrorKind::Serialization, None, e.to_string())
+        })?)
     }
 
     pub async fn approve(
@@ -131,8 +141,12 @@ impl ActionsApi {
             offset,
         };
         self.client
-            .request_json(Method::GET, "/api/v1/actions/pending", Some(&q), None::<&()>)
+            .request_json(
+                Method::GET,
+                "/api/v1/actions/pending",
+                Some(&q),
+                None::<&()>,
+            )
             .await
     }
 }
-

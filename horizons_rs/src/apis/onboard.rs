@@ -14,7 +14,10 @@ impl OnboardApi {
         Self { client }
     }
 
-    pub async fn create_project(&self, project_id: Option<Uuid>) -> Result<ProjectDbHandle, HorizonsError> {
+    pub async fn create_project(
+        &self,
+        project_id: Option<Uuid>,
+    ) -> Result<ProjectDbHandle, HorizonsError> {
         #[derive(Serialize)]
         struct Body<'a> {
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,9 +34,13 @@ impl OnboardApi {
             .request_value(Method::POST, "/api/v1/projects", None::<&()>, Some(&body))
             .await?;
 
-        let handle = v
-            .get("handle")
-            .ok_or_else(|| HorizonsError::new(crate::HorizonsErrorKind::Serialization, None, "missing handle"))?;
+        let handle = v.get("handle").ok_or_else(|| {
+            HorizonsError::new(
+                crate::HorizonsErrorKind::Serialization,
+                None,
+                "missing handle",
+            )
+        })?;
         Ok(serde_json::from_value::<ProjectDbHandle>(handle.clone())?)
     }
 
@@ -103,4 +110,3 @@ impl OnboardApi {
             .await
     }
 }
-

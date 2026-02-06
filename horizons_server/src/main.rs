@@ -142,12 +142,17 @@ async fn main() -> anyhow::Result<()> {
             let helix = std::env::var("HORIZONS_HELIX_URL").ok();
             println!(
                 "helix: {}",
-                helix.as_deref().map(|_| "configured").unwrap_or("not configured")
+                helix
+                    .as_deref()
+                    .map(|_| "configured")
+                    .unwrap_or("not configured")
             );
             let s3 = std::env::var("HORIZONS_S3_BUCKET").ok();
             println!(
                 "s3: {}",
-                s3.as_deref().map(|_| "configured").unwrap_or("not configured")
+                s3.as_deref()
+                    .map(|_| "configured")
+                    .unwrap_or("not configured")
             );
         }
     }

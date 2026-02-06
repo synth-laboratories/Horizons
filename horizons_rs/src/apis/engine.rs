@@ -84,7 +84,12 @@ impl EngineApi {
             env_vars,
         };
         self.client
-            .request_value(Method::POST, "/api/v1/engine/start", None::<&()>, Some(&body))
+            .request_value(
+                Method::POST,
+                "/api/v1/engine/start",
+                None::<&()>,
+                Some(&body),
+            )
             .await
     }
 

@@ -27,8 +27,7 @@ const VERIFIER_FEWSHOT_SINGLE_YAML: &str = include_str!("../graphs/verifier_fews
 const VERIFIER_FEWSHOT_RLM_YAML: &str = include_str!("../graphs/verifier_fewshot_rlm.yaml");
 const VERIFIER_CONTRASTIVE_SINGLE_YAML: &str =
     include_str!("../graphs/verifier_contrastive_single.yaml");
-const VERIFIER_CONTRASTIVE_RLM_YAML: &str =
-    include_str!("../graphs/verifier_contrastive_rlm.yaml");
+const VERIFIER_CONTRASTIVE_RLM_YAML: &str = include_str!("../graphs/verifier_contrastive_rlm.yaml");
 
 /// Canonical graph IDs
 pub const VERIFIER_RUBRIC_SINGLE: &str = "verifier_rubric_single";

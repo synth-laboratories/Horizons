@@ -38,9 +38,13 @@ impl AgentsApi {
             .client
             .request_value(Method::POST, "/api/v1/agents/run", None::<&()>, Some(&body))
             .await?;
-        let result = v
-            .get("result")
-            .ok_or_else(|| crate::HorizonsError::new(crate::HorizonsErrorKind::Serialization, None, "missing result"))?;
+        let result = v.get("result").ok_or_else(|| {
+            crate::HorizonsError::new(
+                crate::HorizonsErrorKind::Serialization,
+                None,
+                "missing result",
+            )
+        })?;
         Ok(serde_json::from_value::<AgentRunResult>(result.clone())?)
     }
 
@@ -72,4 +76,3 @@ impl AgentsApi {
             .await
     }
 }
-

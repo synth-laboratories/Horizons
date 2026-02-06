@@ -199,9 +199,9 @@ impl ContinualLearningEngine {
 
         let mut total = 0.0f64;
         for ex in dataset.examples.iter().take(n) {
-            let prompt = policy.render(&ex.input).map_err(|e| {
-                Error::BackendMessage(format!("policy render failed: {e}"))
-            })?;
+            let prompt = policy
+                .render(&ex.input)
+                .map_err(|e| Error::BackendMessage(format!("policy render failed: {e}")))?;
             let output = llm
                 .complete(&prompt)
                 .await

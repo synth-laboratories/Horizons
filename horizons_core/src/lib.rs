@@ -12,9 +12,9 @@ pub mod memory;
 pub mod models;
 pub mod o11y;
 pub mod onboard;
-pub mod pipelines;
 #[cfg(feature = "optimization")]
 pub mod optimization;
+pub mod pipelines;
 
 pub use context_refresh::models::{
     ContextEntity, CronSchedule, EventTriggerConfig, RefreshRun, RefreshRunQuery, RefreshRunStatus,

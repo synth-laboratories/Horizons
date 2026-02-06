@@ -118,4 +118,3 @@ impl ContextRefreshApi {
             .unwrap_or_default())
     }
 }
-

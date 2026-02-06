@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::errors::{RlmErrorInfo, RlmErrorKind, RlmRunError};
 use super::limits::{LimitStatus, RlmLimits};
@@ -9,10 +9,10 @@ use super::messages::{
     build_system_message, estimate_messages_tokens, sanitize_message_sequence, truncate_text,
 };
 use super::output::{EvidenceItem, RlmRunResult, RlmStats};
-use super::schema::{resolve_answer_schema, validate_answer_simple, ResolvedAnswerSchema};
+use super::schema::{ResolvedAnswerSchema, resolve_answer_schema, validate_answer_simple};
 use super::tools::{
-    build_tool_registry, tool_denied_result, ToolCall, ToolContext, ToolExecutor, ToolRegistry,
-    ToolResult,
+    ToolCall, ToolContext, ToolExecutor, ToolRegistry, ToolResult, build_tool_registry,
+    tool_denied_result,
 };
 use super::trace::{LmCallTrace, RlmExecutionTrace, ToolCallTrace};
 use super::{LmClient, LmRequest, RlmRunRequest, UsageMetrics};
@@ -190,7 +190,9 @@ pub async fn run_rlm(
             .await;
             if let Some(trace_sink) = ctx.trace_sink.as_ref() {
                 let summarize_overhead_ms = summarize_overhead_start.elapsed().as_millis() as i64;
-                trace_sink.record_summarize_overhead(summarize_overhead_ms).await;
+                trace_sink
+                    .record_summarize_overhead(summarize_overhead_ms)
+                    .await;
             }
         }
 
@@ -216,7 +218,9 @@ pub async fn run_rlm(
         request_messages.extend(messages.clone());
         if let Some(trace_sink) = ctx.trace_sink.as_ref() {
             let message_serialize_ms = message_serialize_start.elapsed().as_millis() as i64;
-            trace_sink.record_message_serialize(message_serialize_ms).await;
+            trace_sink
+                .record_message_serialize(message_serialize_ms)
+                .await;
         }
 
         let lm_req = LmRequest {
@@ -260,7 +264,10 @@ pub async fn run_rlm(
             0
         };
 
-        let lm_resp = lm.call(lm_req).await.map_err(|err| RlmRunError::Lm(err.message))?;
+        let lm_resp = lm
+            .call(lm_req)
+            .await
+            .map_err(|err| RlmRunError::Lm(err.message))?;
         root_calls += 1;
         stats = record_usage(stats, &lm_resp.usage, lm_resp.elapsed_ms);
         stats.root_calls = root_calls;
@@ -378,14 +385,19 @@ pub async fn run_rlm(
             continue;
         }
 
-        let calls_to_run = lm_resp.tool_calls.into_iter().take(remaining).collect::<Vec<_>>();
+        let calls_to_run = lm_resp
+            .tool_calls
+            .into_iter()
+            .take(remaining)
+            .collect::<Vec<_>>();
 
         if should_parallelize(&calls_to_run, &request, &tool_registry) {
             emit_tool_calls_started(&ctx, iterations_used, &calls_to_run).await;
             let ctx_for_tools =
                 build_tool_context(&ctx, &request, iterations_used, root_calls, subcalls);
-            let results =
-                tools.execute_many_concurrently(calls_to_run.clone(), ctx_for_tools).await;
+            let results = tools
+                .execute_many_concurrently(calls_to_run.clone(), ctx_for_tools)
+                .await;
             record_parallel_results(
                 calls_to_run,
                 results,
@@ -445,7 +457,9 @@ pub async fn run_rlm(
             }
             if tool_dispatch_overhead_ms > 0 {
                 if let Some(trace_sink) = ctx.trace_sink.as_ref() {
-                    trace_sink.record_tool_dispatch(tool_dispatch_overhead_ms).await;
+                    trace_sink
+                        .record_tool_dispatch(tool_dispatch_overhead_ms)
+                        .await;
                 }
             }
         }
@@ -590,7 +604,10 @@ fn is_sensitive_key(key: &str) -> bool {
 }
 
 fn extract_error_message(value: &Value) -> Option<String> {
-    value.get("error").and_then(|v| v.as_str()).map(|v| v.to_string())
+    value
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
 }
 
 fn should_compact(messages: &[Value], limits: &RlmLimits) -> bool {
@@ -628,7 +645,10 @@ async fn compact_messages_to_history_file(
 
     let mut lines = String::new();
     for (idx, msg) in to_compact.iter().enumerate() {
-        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let role = msg
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let entry = json!({
             "kind": "message",
             "index": num_system_msgs + idx,
@@ -641,7 +661,9 @@ async fn compact_messages_to_history_file(
 
     if !lines.is_empty() {
         if let Some(store) = history_store {
-            let _ = store.append(HISTORY_FILENAME, HISTORY_FIELD_NAME, &lines).await;
+            let _ = store
+                .append(HISTORY_FILENAME, HISTORY_FIELD_NAME, &lines)
+                .await;
         }
     }
 
@@ -733,7 +755,10 @@ fn percent_used(used: i64, limit: i64) -> i64 {
 }
 
 fn latest_message_content(messages: &[Value]) -> Option<Value> {
-    messages.iter().rev().find_map(|msg| msg.get("content").cloned())
+    messages
+        .iter()
+        .rev()
+        .find_map(|msg| msg.get("content").cloned())
 }
 
 fn summarize_messages_for_trace(messages: &[Value]) -> Vec<Value> {
@@ -744,7 +769,10 @@ fn summarize_messages_for_trace(messages: &[Value]) -> Vec<Value> {
             summarized.push(json!({"role": "unknown", "content": text}));
             continue;
         };
-        let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let role = obj
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let content_value = obj.get("content").cloned().unwrap_or(Value::Null);
         let content_text = if let Value::String(text) = content_value {
             text
@@ -909,7 +937,9 @@ async fn record_tool_result(
     tool_result.agent_visible_payload = tool_result.result.clone();
     let result_process_ms = result_process_start.elapsed().as_millis() as i64;
     if let Some(trace_sink) = ctx.trace_sink.as_ref() {
-        trace_sink.record_tool_result_process(result_process_ms).await;
+        trace_sink
+            .record_tool_result_process(result_process_ms)
+            .await;
     }
 
     if let Some(trace_sink) = ctx.trace_sink.as_ref() {
@@ -966,7 +996,9 @@ async fn record_tool_result(
         .unwrap_or_else(|_| "{}".to_string());
     let tool_serialize_ms = tool_serialize_start.elapsed().as_millis() as i64;
     if let Some(trace_sink) = ctx.trace_sink.as_ref() {
-        trace_sink.record_tool_result_serialize(tool_serialize_ms).await;
+        trace_sink
+            .record_tool_result_serialize(tool_serialize_ms)
+            .await;
     }
 
     let message_update_start = Instant::now();
@@ -1099,11 +1131,17 @@ async fn handle_terminal_tools(
         }
 
         if tool_call.name == "submit_answer" {
-            let answer = tool_call.arguments.get("answer").cloned().unwrap_or(Value::Null);
+            let answer = tool_call
+                .arguments
+                .get("answer")
+                .cloned()
+                .unwrap_or(Value::Null);
             if let Some(schema) = resolved_schema.as_ref().map(|s| &s.schema) {
                 if let Some(error_msg) = validate_answer_simple(&answer, schema) {
-                    let tc_id =
-                        tool_call.id.clone().unwrap_or_else(|| "submit_answer_call".to_string());
+                    let tc_id = tool_call
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| "submit_answer_call".to_string());
                     let required = schema
                         .get("required")
                         .and_then(|v| v.as_array())
@@ -1149,7 +1187,11 @@ async fn handle_terminal_tools(
             .await;
 
             let mut result_value = if answer.is_object() {
-                answer.as_object().cloned().map(Value::Object).unwrap_or(json!({}))
+                answer
+                    .as_object()
+                    .cloned()
+                    .map(Value::Object)
+                    .unwrap_or(json!({}))
             } else {
                 json!({"answer": answer})
             };
@@ -1415,7 +1457,10 @@ async fn execute_delegate_lm(
         tools: None,
         tool_choice: None,
     };
-    let response = lm.call(lm_req).await.map_err(|err| RlmRunError::Lm(err.message))?;
+    let response = lm
+        .call(lm_req)
+        .await
+        .map_err(|err| RlmRunError::Lm(err.message))?;
     *stats = record_usage(stats.clone(), &response.usage, response.elapsed_ms);
 
     if response_format.is_some() {

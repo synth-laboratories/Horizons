@@ -64,7 +64,10 @@ impl GraphDefinition {
         let obj = value
             .as_object()
             .ok_or_else(|| GraphError::bad_request("graph definition must be an object"))?;
-        let name = obj.get("name").and_then(|v| v.as_str()).map(|v| v.to_string());
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
         let metadata = obj.get("metadata").cloned();
         let nodes_value = obj
             .get("nodes")
@@ -90,15 +93,20 @@ impl GraphDefinition {
     }
 }
 
-fn parse_node_definition(
-    node_key: &str,
-    node_value: &Value,
-) -> Result<NodeDefinition, GraphError> {
+fn parse_node_definition(node_key: &str, node_value: &Value) -> Result<NodeDefinition, GraphError> {
     let node_obj = node_value
         .as_object()
         .ok_or_else(|| GraphError::bad_request(format!("node '{node_key}' must be an object")))?;
-    let name = node_obj.get("name").and_then(|v| v.as_str()).unwrap_or(node_key).to_string();
-    let node_type = node_obj.get("type").and_then(|v| v.as_str()).unwrap_or("DagNode").to_string();
+    let name = node_obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(node_key)
+        .to_string();
+    let node_type = node_obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("DagNode")
+        .to_string();
     let input_mapping = node_obj.get("input_mapping").cloned();
     let output_mapping = node_obj.get("output_mapping").cloned();
     let implementation = node_obj.get("implementation").cloned();
@@ -113,24 +121,36 @@ fn parse_node_definition(
             GraphError::bad_request(format!("MapNode '{name}' requires inner_node"))
         })?;
         let default_inner_name = format!("{name}_inner");
-        let inner_name =
-            inner_value.get("name").and_then(|v| v.as_str()).unwrap_or(&default_inner_name);
+        let inner_name = inner_value
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&default_inner_name);
         let mut inner_def = parse_node_definition(inner_name, inner_value)?;
         inner_def.name = inner_name.to_string();
         inner_node = Some(Box::new(inner_def));
 
-        let state_keys = node_obj.get("state_keys").and_then(|v| v.as_array()).map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(|v| v.to_string()))
-                .collect::<Vec<String>>()
-        });
-        let max_concurrent =
-            node_obj.get("max_concurrent").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-        let item_timeout_ms =
-            node_obj.get("item_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(60000);
-        let item_key =
-            node_obj.get("item_key").and_then(|v| v.as_str()).unwrap_or("item").to_string();
+        let state_keys = node_obj
+            .get("state_keys")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|v| v.to_string()))
+                    .collect::<Vec<String>>()
+            });
+        let max_concurrent = node_obj
+            .get("max_concurrent")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as usize;
+        let item_timeout_ms = node_obj
+            .get("item_timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(60000);
+        let item_key = node_obj
+            .get("item_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("item")
+            .to_string();
         map_config = Some(MapConfig {
             item_key,
             state_keys,
@@ -140,21 +160,38 @@ fn parse_node_definition(
     } else if normalized_type == "reducenode" || normalized_type == "reduce_node" {
         if let Some(inner_value) = node_obj.get("inner_node") {
             let default_inner_name = format!("{name}_inner");
-            let inner_name =
-                inner_value.get("name").and_then(|v| v.as_str()).unwrap_or(&default_inner_name);
+            let inner_name = inner_value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&default_inner_name);
             let mut inner_def = parse_node_definition(inner_name, inner_value)?;
             inner_def.name = inner_name.to_string();
             inner_node = Some(Box::new(inner_def));
         }
-        let reduce_strategy =
-            node_obj.get("reduce_strategy").and_then(|v| v.as_str()).map(|v| v.to_string());
-        let reduce_fn = node_obj.get("reduce_fn").and_then(|v| v.as_str()).map(|v| v.to_string());
-        let value_key = node_obj.get("value_key").and_then(|v| v.as_str()).map(|v| v.to_string());
-        let results_key =
-            node_obj.get("results_key").and_then(|v| v.as_str()).map(|v| v.to_string());
-        let min_success = node_obj.get("min_success").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let require_all_success =
-            node_obj.get("require_all_success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let reduce_strategy = node_obj
+            .get("reduce_strategy")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let reduce_fn = node_obj
+            .get("reduce_fn")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let value_key = node_obj
+            .get("value_key")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let results_key = node_obj
+            .get("results_key")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let min_success = node_obj
+            .get("min_success")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let require_all_success = node_obj
+            .get("require_all_success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         reduce_config = Some(ReduceConfig {
             reduce_strategy,
             reduce_fn,
@@ -196,9 +233,14 @@ fn parse_control_edges(
             let edge_obj = edge_value.as_object().ok_or_else(|| {
                 GraphError::bad_request(format!("control_edges.{source} entries must be objects"))
             })?;
-            let target = edge_obj.get("target").and_then(|v| v.as_str()).ok_or_else(|| {
-                GraphError::bad_request(format!("control_edges.{source} entries require target"))
-            })?;
+            let target = edge_obj
+                .get("target")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    GraphError::bad_request(format!(
+                        "control_edges.{source} entries require target"
+                    ))
+                })?;
             let condition = edge_obj.get("condition").cloned();
             parsed_edges.push(ControlEdge {
                 target: target.to_string(),

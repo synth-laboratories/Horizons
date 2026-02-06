@@ -9,4 +9,3 @@ pub use apis::*;
 pub use client::{ClientOptions, HorizonsClient};
 pub use error::{HorizonsError, HorizonsErrorKind};
 pub use types::*;
-

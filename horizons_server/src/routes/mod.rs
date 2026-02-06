@@ -16,9 +16,9 @@ pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
 pub mod onboard;
-pub mod pipelines;
 #[cfg(feature = "optimization")]
 pub mod optimization;
+pub mod pipelines;
 pub mod projects;
 
 #[tracing::instrument(level = "debug", skip_all)]

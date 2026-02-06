@@ -159,7 +159,9 @@ pub async fn cycle(
     #[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
     {
         let cfg = horizons_core::optimization::continual::CycleConfig {
-            memory_horizon: std::time::Duration::from_secs(req.memory_horizon_seconds.unwrap_or(60 * 60)),
+            memory_horizon: std::time::Duration::from_secs(
+                req.memory_horizon_seconds.unwrap_or(60 * 60),
+            ),
             memory_limit: req.memory_limit.unwrap_or(100),
             min_improvement: req.min_improvement.unwrap_or(0.0),
             eval_samples: req.eval_samples.unwrap_or(10),

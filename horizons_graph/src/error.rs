@@ -36,4 +36,3 @@ impl GraphError {
         Self::Unavailable(message.into())
     }
 }
-

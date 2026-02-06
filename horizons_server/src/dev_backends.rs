@@ -60,9 +60,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::server::AppState;
+use horizons_graph::GraphEngine;
 use horizons_graph::llm::LlmClient as GraphLlmClient;
 use horizons_graph::tools::DefaultToolExecutor as GraphToolExecutor;
-use horizons_graph::GraphEngine;
 
 struct BuiltinGraphRunner {
     engine: Arc<GraphEngine>,
@@ -1563,14 +1563,17 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
 
         let graph_runner = Some(Arc::new(BuiltinGraphRunner {
             engine: graph_engine.clone(),
-        }) as Arc<dyn horizons_core::pipelines::traits::GraphRunner>);
+        })
+            as Arc<dyn horizons_core::pipelines::traits::GraphRunner>);
 
-        Arc::new(horizons_core::pipelines::engine::DefaultPipelineRunner::new(
-            event_bus.clone(),
-            subagent,
-            mcp_client,
-            graph_runner,
-        )) as Arc<dyn horizons_core::pipelines::traits::PipelineRunner>
+        Arc::new(
+            horizons_core::pipelines::engine::DefaultPipelineRunner::new(
+                event_bus.clone(),
+                subagent,
+                mcp_client,
+                graph_runner,
+            ),
+        ) as Arc<dyn horizons_core::pipelines::traits::PipelineRunner>
     };
 
     #[cfg(feature = "memory")]
@@ -1632,7 +1635,9 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
     };
 
     #[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
-    let continual_learning: Arc<horizons_core::optimization::continual::ContinualLearningEngine> = {
+    let continual_learning: Arc<
+        horizons_core::optimization::continual::ContinualLearningEngine,
+    > = {
         // Rebuild the same underlying optimizer/evaluator wiring used above so the cycle endpoint
         // can access the concrete MIPRO optimizer (for prompt rendering + LLM access).
         let llm = Arc::new(DevMiproLlm) as Arc<dyn MiproLlmClient>;
@@ -1640,7 +1645,9 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         let metric = Arc::new(ExactMatchMetric) as Arc<dyn mipro_v2::EvalMetric>;
         let cl_impl = Arc::new(build_mipro_continual_learning(llm, sampler, metric));
 
-        let cfg = VerifierConfig { pass_threshold: 0.0 };
+        let cfg = VerifierConfig {
+            pass_threshold: 0.0,
+        };
         let signals = vec![RewardSignal {
             name: "contains_ok".to_string(),
             weight: SignalWeight(1.0),
@@ -1652,12 +1659,14 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         let ev = Arc::new(build_rlm_evaluator(cfg, signals, None)?)
             as Arc<dyn horizons_core::evaluation::traits::Evaluator>;
 
-        Arc::new(horizons_core::optimization::continual::ContinualLearningEngine::new(
-            memory.clone(),
-            cl_impl,
-            ev,
-            event_bus.clone(),
-        ))
+        Arc::new(
+            horizons_core::optimization::continual::ContinualLearningEngine::new(
+                memory.clone(),
+                cl_impl,
+                ev,
+                event_bus.clone(),
+            ),
+        )
     };
 
     // Seed a default org and user so the dev server is usable.

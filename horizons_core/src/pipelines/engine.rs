@@ -272,7 +272,9 @@ impl DefaultPipelineRunner {
         }
 
         for attempt in 1..=attempts {
-            let res = self.execute_step_once(step, step_inputs.clone(), identity, ctx).await;
+            let res = self
+                .execute_step_once(step, step_inputs.clone(), identity, ctx)
+                .await;
             match res {
                 Ok(v) => return Ok(v),
                 Err(e) => {
@@ -334,7 +336,8 @@ impl DefaultPipelineRunner {
                         "pipeline graph step requires graph runner".to_string(),
                     ));
                 };
-                gr.run_graph(graph_id, step_inputs, ctx.clone(), identity).await
+                gr.run_graph(graph_id, step_inputs, ctx.clone(), identity)
+                    .await
             }
             StepKind::LlmCall { .. } => Err(Error::InvalidInput(
                 "LlmCall step not implemented".to_string(),
@@ -368,12 +371,11 @@ impl Subagent for CoreAgentsSubagent {
         _tools: Vec<String>,
         context: Value,
     ) -> Result<Value> {
-        let h = context
-            .get("_project_db_handle")
-            .cloned()
-            .ok_or_else(|| Error::InvalidInput("subagent context missing _project_db_handle".to_string()))?;
-        let handle: ProjectDbHandle =
-            serde_json::from_value(h).map_err(|e| Error::backend("deserialize _project_db_handle", e))?;
+        let h = context.get("_project_db_handle").cloned().ok_or_else(|| {
+            Error::InvalidInput("subagent context missing _project_db_handle".to_string())
+        })?;
+        let handle: ProjectDbHandle = serde_json::from_value(h)
+            .map_err(|e| Error::backend("deserialize _project_db_handle", e))?;
 
         let identity = AgentIdentity::System {
             name: "pipeline".to_string(),

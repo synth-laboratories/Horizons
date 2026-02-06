@@ -239,4 +239,3 @@ pub struct Health {
     pub status: String,
     pub uptime_ms: i64,
 }
-

@@ -1,10 +1,10 @@
 //! Sandbox crash detection + restart for long-running `start_agent_tracked` runs.
 
+use crate::Result;
 use crate::engine::sandbox_agent_client::SandboxAgentClient;
 use crate::engine::sandbox_runtime::SandboxRuntime;
 use crate::events::models::{Event, EventDirection};
 use crate::events::traits::EventBus;
-use crate::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,10 +91,7 @@ impl SandboxHealthMonitor {
                 None,
             )
             .map_err(|e| crate::Error::backend("build health_check_failed event", e))?;
-            let _ = self
-                .event_bus
-                .publish(ev)
-                .await;
+            let _ = self.event_bus.publish(ev).await;
 
             if *failures < self.max_missed_heartbeats {
                 continue;
@@ -118,10 +115,7 @@ impl SandboxHealthMonitor {
                 None,
             )
             .map_err(|e| crate::Error::backend("build sandbox.crashed event", e))?;
-            let _ = self
-                .event_bus
-                .publish(ev)
-                .await;
+            let _ = self.event_bus.publish(ev).await;
 
             let mut restarted = false;
             if let Some(policy) = run.config.restart_policy {
@@ -129,9 +123,7 @@ impl SandboxHealthMonitor {
                     // Exponential backoff based on the current restart_count.
                     let pow: u32 = run.restart_count.min(16) as u32;
                     let factor = 1u64.checked_shl(pow).unwrap_or(u64::MAX);
-                    let backoff = policy
-                        .backoff_ms
-                        .saturating_mul(factor);
+                    let backoff = policy.backoff_ms.saturating_mul(factor);
                     if backoff > 0 {
                         tokio::time::sleep(Duration::from_millis(backoff)).await;
                     }
@@ -161,10 +153,7 @@ impl SandboxHealthMonitor {
                             .map_err(|e| {
                                 crate::Error::backend("build sandbox.restarted event", e)
                             })?;
-                            let _ = self
-                                .event_bus
-                                .publish(ev)
-                                .await;
+                            let _ = self.event_bus.publish(ev).await;
                         }
                         Err(e) => {
                             tracing::warn!(run_id = %run.run_id, %e, "restart failed");

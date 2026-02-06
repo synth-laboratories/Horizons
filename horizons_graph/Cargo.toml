@@ -5,7 +5,7 @@ edition = "2024"
 license-file = "LICENSE.md"
 
 [features]
-default = ["rlm_v1"]
+default = ["rlm_v1", "monty"]
 
 # Embed the graph-rlm-v1 implementation as a module.
 rlm_v1 = []

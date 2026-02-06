@@ -36,7 +36,12 @@ impl OptimizationApi {
             project_id: project_id.map(|u| u.to_string()),
         };
         self.client
-            .request_json(Method::POST, "/api/v1/optimization/run", None::<&()>, Some(&body))
+            .request_json(
+                Method::POST,
+                "/api/v1/optimization/run",
+                None::<&()>,
+                Some(&body),
+            )
             .await
     }
 
@@ -100,4 +105,3 @@ impl OptimizationApi {
             .await
     }
 }
-

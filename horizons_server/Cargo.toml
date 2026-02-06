@@ -13,7 +13,7 @@ chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5.31", features = ["derive", "env"] }
 futures-util = "0.3.31"
 horizons_core = { path = "../horizons_core", default-features = false }
-horizons_graph = { path = "../horizons_graph" }
+horizons_graph = { path = "../horizons_graph", default-features = false, features = ["rlm_v1"] }
 horizons_integrations = { path = "../horizons_integrations", default-features = false, features = ["pgvector"] }
 http = "1.2.0"
 mipro_v2 = { path = "../mipro_v2", optional = true }

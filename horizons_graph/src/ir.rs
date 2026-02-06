@@ -98,7 +98,10 @@ pub struct ValidationResult {
 
 impl ValidationResult {
     pub fn ok(&self) -> bool {
-        !self.diagnostics.iter().any(|diag| diag.severity == DiagnosticSeverity::Error)
+        !self
+            .diagnostics
+            .iter()
+            .any(|diag| diag.severity == DiagnosticSeverity::Error)
     }
 }
 
@@ -292,8 +295,11 @@ fn validate_graph_definition_value(value: &Value, strictness: Strictness) -> Vec
         );
     }
 
-    let unknown_keys: Vec<String> =
-        obj.keys().filter(|key| !allowed_keys.contains(key.as_str())).cloned().collect();
+    let unknown_keys: Vec<String> = obj
+        .keys()
+        .filter(|key| !allowed_keys.contains(key.as_str()))
+        .cloned()
+        .collect();
     if !unknown_keys.is_empty() {
         push_error(
             &mut diagnostics,
@@ -436,7 +442,10 @@ fn validate_node_definitions(nodes: &Map<String, Value>) -> Vec<Diagnostic> {
                 format!("Node '{node_name}' is missing the 'implementation' key."),
                 Some(format!("nodes.{node_name}.implementation")),
             );
-        } else if !node_obj.get("implementation").is_some_and(|value| value.is_object()) {
+        } else if !node_obj
+            .get("implementation")
+            .is_some_and(|value| value.is_object())
+        {
             push_error(
                 &mut diagnostics,
                 format!("'implementation' for node '{node_name}' must be a dictionary."),
@@ -733,8 +742,10 @@ fn canonicalize_string_array(value: &Value) -> Value {
         return canonicalize_value(value);
     };
     if array.iter().all(|item| item.is_string()) {
-        let mut items: Vec<String> =
-            array.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect();
+        let mut items: Vec<String> = array
+            .iter()
+            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+            .collect();
         items.sort();
         Value::Array(items.into_iter().map(Value::String).collect())
     } else {
@@ -745,8 +756,10 @@ fn canonicalize_string_array(value: &Value) -> Value {
 fn canonicalize_value(value: &Value) -> Value {
     match value {
         Value::Object(obj) => {
-            let mut entries: Vec<(String, Value)> =
-                obj.iter().map(|(key, val)| (key.clone(), canonicalize_value(val))).collect();
+            let mut entries: Vec<(String, Value)> = obj
+                .iter()
+                .map(|(key, val)| (key.clone(), canonicalize_value(val)))
+                .collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             let mut map = Map::new();
             for (key, val) in entries {
@@ -770,7 +783,9 @@ fn graph_type_from_value(obj: &Map<String, Value>) -> Option<String> {
             return Some(graph_type.to_string());
         }
     }
-    obj.get("type").and_then(|value| value.as_str()).map(|value| value.to_string())
+    obj.get("type")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
 }
 
 fn is_verifier_graph(graph_type: &str) -> bool {
@@ -801,7 +816,10 @@ fn detect_cycle(
                 .and_then(|value| value.as_str())
             {
                 if node_keys.contains(target) {
-                    adjacency.entry(source.clone()).or_default().push(target.to_string());
+                    adjacency
+                        .entry(source.clone())
+                        .or_default()
+                        .push(target.to_string());
                 }
             }
         }
@@ -874,4 +892,3 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
-
