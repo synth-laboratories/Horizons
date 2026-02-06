@@ -1,6 +1,15 @@
 # Build artifacts
 /target/
 **/*.rs.bk
+dist/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.egg-info/
+*.pyc
 
 # IDE
 .idea/
