@@ -34,7 +34,7 @@ pub fn render_markdown_report(report: &EvalReport) -> String {
     if !report.outcome.reasoning.trim().is_empty() {
         s.push_str("\n## Reasoning\n\n");
         s.push_str(report.outcome.reasoning.trim());
-        s.push_str("\n");
+        s.push('\n');
     }
     s
 }

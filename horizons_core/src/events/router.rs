@@ -83,10 +83,11 @@ impl EventRouter {
             wake_tx,
         };
 
-        let mut tasks = Vec::new();
-        tasks.push(tokio::spawn(router.clone().run_worker(wake_rx)));
-        tasks.push(tokio::spawn(router.clone().run_redis_listener()));
-        tasks.push(tokio::spawn(router.clone().run_sweeper()));
+        let tasks = vec![
+            tokio::spawn(router.clone().run_worker(wake_rx)),
+            tokio::spawn(router.clone().run_redis_listener()),
+            tokio::spawn(router.clone().run_sweeper()),
+        ];
 
         EventRouterHandle { router, tasks }
     }

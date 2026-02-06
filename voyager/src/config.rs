@@ -83,23 +83,12 @@ impl Default for VectorHttpConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VoyagerConfig {
     pub helix: HelixHttpConfig,
     pub vector: VectorHttpConfig,
     pub retrieval: RetrievalConfig,
     pub summarization: SummarizationConfig,
-}
-
-impl Default for VoyagerConfig {
-    fn default() -> Self {
-        Self {
-            helix: HelixHttpConfig::default(),
-            vector: VectorHttpConfig::default(),
-            retrieval: RetrievalConfig::default(),
-            summarization: SummarizationConfig::default(),
-        }
-    }
 }
 
 impl VoyagerConfig {
@@ -126,7 +115,7 @@ impl VoyagerConfig {
                 self.retrieval.importance_weight,
             ),
         ] {
-            if !w.is_finite() || w < 0.0 || w > 1.0 {
+            if !w.is_finite() || !(0.0..=1.0).contains(&w) {
                 return Err(VoyagerError::InvalidConfig(format!(
                     "{name} must be finite and in [0,1]"
                 )));

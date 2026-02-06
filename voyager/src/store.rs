@@ -102,15 +102,15 @@ impl MemoryStore for InMemoryStore {
                 true
             })
             .filter(|it| {
-                if let Some(after) = filter.created_after.as_ref() {
-                    if it.created_at < *after {
-                        return false;
-                    }
+                if let Some(after) = filter.created_after.as_ref()
+                    && it.created_at < *after
+                {
+                    return false;
                 }
-                if let Some(before) = filter.created_before.as_ref() {
-                    if it.created_at > *before {
-                        return false;
-                    }
+                if let Some(before) = filter.created_before.as_ref()
+                    && it.created_at > *before
+                {
+                    return false;
                 }
                 true
             })
@@ -196,20 +196,20 @@ impl VectorIndex for InMemoryVectorIndex {
                 {
                     return false;
                 }
-                if let Some(types) = &filter.type_filter {
-                    if !types.contains(&emb.item_type) {
-                        return false;
-                    }
+                if let Some(types) = &filter.type_filter
+                    && !types.contains(&emb.item_type)
+                {
+                    return false;
                 }
-                if let Some(after) = filter.created_after.as_ref() {
-                    if emb.created_at < *after {
-                        return false;
-                    }
+                if let Some(after) = filter.created_after.as_ref()
+                    && emb.created_at < *after
+                {
+                    return false;
                 }
-                if let Some(before) = filter.created_before.as_ref() {
-                    if emb.created_at > *before {
-                        return false;
-                    }
+                if let Some(before) = filter.created_before.as_ref()
+                    && emb.created_at > *before
+                {
+                    return false;
                 }
                 true
             })
@@ -421,20 +421,20 @@ RETURN m.item_json as item_json, m.created_at as created_at
                 {
                     return false;
                 }
-                if let Some(types) = &filter.type_filter {
-                    if !types.contains(&it.item_type) {
-                        return false;
-                    }
+                if let Some(types) = &filter.type_filter
+                    && !types.contains(&it.item_type)
+                {
+                    return false;
                 }
-                if let Some(after) = filter.created_after.as_ref() {
-                    if it.created_at < *after {
-                        return false;
-                    }
+                if let Some(after) = filter.created_after.as_ref()
+                    && it.created_at < *after
+                {
+                    return false;
                 }
-                if let Some(before) = filter.created_before.as_ref() {
-                    if it.created_at > *before {
-                        return false;
-                    }
+                if let Some(before) = filter.created_before.as_ref()
+                    && it.created_at > *before
+                {
+                    return false;
                 }
                 true
             })

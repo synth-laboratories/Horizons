@@ -113,11 +113,11 @@ impl VoyagerMemory {
         }
 
         let scope = item.scope();
-        if item.importance_0_to_1.is_none() {
-            if let Some(model) = self.importance.as_ref() {
-                let s = model.score_importance_0_to_1(&scope, &item).await?;
-                item.importance_0_to_1 = Some(s);
-            }
+        if item.importance_0_to_1.is_none()
+            && let Some(model) = self.importance.as_ref()
+        {
+            let s = model.score_importance_0_to_1(&scope, &item).await?;
+            item.importance_0_to_1 = Some(s);
         }
 
         let text = text_for_embedding(&item);
@@ -249,12 +249,11 @@ impl VoyagerMemory {
 }
 
 fn text_for_embedding(item: &MemoryItem) -> String {
-    if item.item_type == MemoryType::episode_summary() {
-        if let Some(v) = item.content.get("text") {
-            if let Some(s) = v.as_str() {
-                return s.to_string();
-            }
-        }
+    if item.item_type == MemoryType::episode_summary()
+        && let Some(v) = item.content.get("text")
+        && let Some(s) = v.as_str()
+    {
+        return s.to_string();
     }
     item.index_text_or_fallback()
 }
@@ -269,10 +268,10 @@ fn summarized_item_ids(items: &[MemoryItem]) -> HashSet<Ulid> {
             continue;
         };
         for v in arr {
-            if let Some(s) = v.as_str() {
-                if let Ok(id) = s.parse::<Ulid>() {
-                    out.insert(id);
-                }
+            if let Some(s) = v.as_str()
+                && let Ok(id) = s.parse::<Ulid>()
+            {
+                out.insert(id);
             }
         }
     }

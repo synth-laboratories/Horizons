@@ -1,0 +1,38 @@
+name: Nightly Tag
+
+on:
+  push:
+    branches:
+      - nightly
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute tag
+        id: vars
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -E '^version\\s*=\\s*\"' horizons_rs/Cargo.toml | head -n 1 | sed -E 's/^.*\"([^\"]+)\".*$/\\1/')"
+          BASE="${VERSION%%-*}"
+          DATE="$(date -u +%Y%m%d)"
+          TAG="v${BASE}-dev.${DATE}.${GITHUB_RUN_NUMBER}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag (if missing)
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.vars.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag exists: $TAG"
+            exit 0
+          fi
+          git tag -a "$TAG" -m "Nightly $TAG"
+          git push origin "$TAG"

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use horizons_core::Result;
 use horizons_core::context_refresh::models::ContextEntity;
 use horizons_core::context_refresh::traits::{Connector, PullResult, RawRecord};
-use horizons_core::models::{OrgId, ProjectId};
+use horizons_core::models::OrgId;
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;

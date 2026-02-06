@@ -142,11 +142,9 @@ impl StdioServer {
 
 enum McpServerHandle {
     Stdio {
-        name: String,
-        server: Mutex<StdioServer>,
+        server: Box<Mutex<StdioServer>>,
     },
     Http {
-        name: String,
         url: String,
         headers: HashMap<String, String>,
         client: HttpClient,
@@ -154,13 +152,6 @@ enum McpServerHandle {
 }
 
 impl McpServerHandle {
-    fn name(&self) -> &str {
-        match self {
-            Self::Stdio { name, .. } => name,
-            Self::Http { name, .. } => name,
-        }
-    }
-
     async fn shutdown(&self) {
         if let Self::Stdio { server, .. } = self {
             let mut s = server.lock().await;
@@ -315,7 +306,6 @@ impl McpGateway {
             if cfg.name.trim().is_empty() {
                 return Err(Error::InvalidInput("mcp server name is empty".to_string()));
             }
-            let name = cfg.name.clone();
 
             let handle = match &cfg.transport {
                 McpTransport::Stdio { command, args, env } => {
@@ -326,8 +316,7 @@ impl McpGateway {
                     }
                     let server = StdioServer::spawn(command, args, env).await?;
                     McpServerHandle::Stdio {
-                        name,
-                        server: Mutex::new(server),
+                        server: Box::new(Mutex::new(server)),
                     }
                 }
                 McpTransport::Http { url, headers } => {
@@ -335,7 +324,6 @@ impl McpGateway {
                         return Err(Error::InvalidInput("mcp http url is empty".to_string()));
                     }
                     McpServerHandle::Http {
-                        name,
                         url: url.clone(),
                         headers: headers.clone(),
                         client: HttpClient::new(),

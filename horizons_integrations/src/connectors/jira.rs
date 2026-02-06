@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use horizons_core::Result;
 use horizons_core::context_refresh::models::ContextEntity;
 use horizons_core::context_refresh::traits::{Connector, PullResult, RawRecord};
-use horizons_core::models::{OrgId, ProjectId};
+use horizons_core::models::OrgId;
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
@@ -66,11 +66,11 @@ impl Connector for JiraConnector {
         "jira"
     }
 
-    #[instrument(level = "info", skip(self, source, cursor))]
+    #[instrument(level = "info", skip(self, _source, cursor))]
     async fn pull(
         &self,
         _org_id: OrgId,
-        source: &horizons_core::context_refresh::models::SourceConfig,
+        _source: &horizons_core::context_refresh::models::SourceConfig,
         cursor: Option<horizons_core::context_refresh::models::SyncCursor>,
     ) -> Result<PullResult> {
         let mut req = self

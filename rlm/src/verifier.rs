@@ -76,7 +76,7 @@ fn aggregate(cfg: &VerifierConfig, signal_scores: Vec<SignalScore>) -> Result<Re
         sum_ws += w * s.score_0_to_1.clamp(0.0, 1.0);
         if !s.reasoning.trim().is_empty() {
             if !reasoning.is_empty() {
-                reasoning.push_str("\n");
+                reasoning.push('\n');
             }
             reasoning.push_str(&format!("{}: {}", s.name, s.reasoning.trim()));
         }

@@ -21,8 +21,6 @@ struct SlackHistoryResponse {
     messages: Vec<SlackMessage>,
     #[serde(default)]
     error: Option<String>,
-    #[serde(rename = "has_more", default)]
-    has_more: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
