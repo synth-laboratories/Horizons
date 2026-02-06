@@ -1,91 +1,86 @@
 # Horizons
 
-Platform for building, evaluating, and optimizing AI agents in production. Provides structured event routing, long-term memory, prompt optimization, automated evaluation, and human-in-the-loop action approval.
+Horizons is a Rust-first runtime for shipping agent systems: event-driven orchestration, project-scoped state, graph execution, and auditable actions.
 
-## Crates
+## Components
 
-| Crate | Version | Description |
-|-------|---------|-------------|
-| `horizons_core` | 0.1.0 | Core domain — events, context refresh, agent actions, sandbox engine, onboarding, project DB |
-| `horizons_rs` | 0.1.0 | HTTP API server (Axum) with dev-mode in-memory backends |
-| `horizons_integrations` | 0.1.0 | Infrastructure integrations: queue backends (SQS, RabbitMQ), pgvector, Langfuse |
-| `voyager` | 0.1.0 | Agent memory — store, retrieve, and rank episodic and semantic memories |
-| `mipro_v2` | 0.1.0 | Prompt optimization — dataset splits, candidate generation, early stopping |
-| `rlm` | 0.1.0 | Evaluation — reward signals, weighted scoring, pass/fail verification |
+- `horizons_rs`: Axum HTTP API server.
+- `horizons_core`: core domain models and backend traits (events, onboarding/project DB, agents/actions, pipelines, sandbox runtime).
+- `horizons_graph`: DAG execution engine (LLM/tool/python nodes) with a built-in verifier graph registry.
+- `horizons_integrations`: infrastructure adapters (e.g. vector store, queue backends, observability sinks).
+- `voyager`: memory primitives (embed/retrieve/rank).
+- `mipro_v2`: prompt/policy optimization engine.
+- `rlm`: reward-signal evaluation engine.
 
-All crates use Rust edition 2024.
-
-## SDKs
-
-| SDK | Version | Path |
-|-----|---------|------|
-| Python (`horizons`) | 0.1.0 | `horizons_py/` |
-| TypeScript (`@horizons/sdk`) | 0.1.0 | `horizons_ts/` |
-
-## Getting Started
-
-### Docker Compose (recommended)
+## Quickstart
 
 ```bash
 docker compose up
-```
-
-Starts the Horizons server on `http://localhost:8000` with persistent local storage. No external services required.
-
-Verify:
-
-```bash
 curl http://localhost:8000/health
 ```
 
-### From source
+## Run From Source
 
-Prerequisites: Rust 1.85+ (edition 2024 support).
+Prerequisites:
+
+- Rust toolchain with edition 2024 support
+- `python3` in `PATH` (used by graph `python_function` nodes)
 
 ```bash
 cargo build --release -p horizons_rs --features all
 cargo run --release -p horizons_rs --features all -- serve
 ```
 
-Starts on `http://localhost:8000` with dev backends (SQLite + local filesystem). No external services required.
+## Graph API
 
-### Install the Python SDK
+Horizons exposes the graph engine under `/api/v1/graph/*`.
 
-```bash
-cd horizons_py
-pip install -e .
-```
-
-### Install the TypeScript SDK
+List built-in graphs:
 
 ```bash
-cd horizons_ts
-npm install
-npm run build
+curl -sS \
+  -H "x-org-id: $ORG_ID" \
+  -H "x-project-id: $PROJECT_ID" \
+  "http://localhost:8000/api/v1/graph/registry"
 ```
 
-## Architecture
+Validate a built-in graph:
 
+```bash
+curl -sS \
+  -H "x-org-id: $ORG_ID" \
+  -H "x-project-id: $PROJECT_ID" \
+  -X POST "http://localhost:8000/api/v1/graph/validate" \
+  -d '{"graph_id":"verifier_rubric_single","strictness":"strict"}'
 ```
-horizons_rs (HTTP API)
-├── horizons_core
-│   ├── events         — publish/subscribe on dot-delimited topics, glob matching, retry + DLQ
-│   ├── context_refresh — pull from external sources on cron or event triggers
-│   ├── core_agents    — action proposals, risk levels, review policies (auto/AI/human)
-│   ├── engine         — sandbox runtime (Docker/Daytona), sandbox-agent client, agent scheduling
-│   ├── onboard        — project DB (Turso/Postgres/S3), user roles, audit log
-│   └── o11y           — OpenTelemetry + Langfuse observability
-├── horizons_integrations
-│   ├── queue_backends — SQS, RabbitMQ
-│   ├── vector         — pgvector (VectorStore)
-│   └── langfuse       — trace export
-├── voyager            — episodic memory with relevance/recency/importance ranking
-├── mipro_v2           — MiPRO prompt optimization with holdout evaluation
-└── rlm                — reward signals (exact match, contains, LLM rubric), weighted scoring
+
+Execute a graph from YAML:
+
+```bash
+curl -sS \
+  -H "x-org-id: $ORG_ID" \
+  -H "x-project-id: $PROJECT_ID" \
+  -X POST "http://localhost:8000/api/v1/graph/execute" \
+  -d '{
+    "graph_yaml": "name: hello\nstart_nodes: [n1]\nend_nodes: [n1]\nnodes:\n  n1:\n    name: n1\n    type: DagNode\n    input_mapping: \"{}\"\n    implementation:\n      type: python_function\n      fn_name: main\n      fn_str: |\n        def main():\n            return {\"ok\": True}\ncontrol_edges:\n  n1: []\n",
+    "inputs": {}
+  }'
 ```
+
+Notes:
+
+- The HTTP layer injects `"_horizons": {"org_id": "...", "project_id": "..."}` into graph inputs.
+- LLM nodes resolve API keys from `GRAPH_LLM_API_KEY` and provider-specific env vars (e.g. `OPENAI_API_KEY`).
+- Tool calls can be routed to a remote executor via `GRAPH_TOOL_EXECUTOR_URL` (optional).
+
+## SDKs
+
+- Python SDK: `horizons_py/` (`pip install -e horizons_py`)
+- TypeScript SDK: `horizons_ts/` (`npm install && npm run build`)
 
 ## License
 
 [FSL-1.1-Apache-2.0](LICENSE.md) (the Sentry license) — Copyright 2026 Synth Incorporated.
 
 Free to use, modify, and redistribute for any purpose except building a competing product. Converts to Apache 2.0 after two years.
+
