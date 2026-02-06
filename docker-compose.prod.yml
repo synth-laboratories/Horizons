@@ -1,0 +1,75 @@
+services:
+  horizons:
+    build: .
+    container_name: horizons
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # The server will use PostgresCentralDb + RedisEventBus + RedisCache when these are set.
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+
+      # Optional: use the same Postgres for vector search (pgvector).
+      HORIZONS_VECTOR_DB_URL: ${HORIZONS_VECTOR_DB_URL:-${DATABASE_URL}}
+      HORIZONS_VECTOR_DIM: ${HORIZONS_VECTOR_DIM:-64}
+
+      # Optional: MCP gateway configuration (JSON).
+      HORIZONS_MCP_CONFIG: ${HORIZONS_MCP_CONFIG:-}
+      HORIZONS_MCP_SCOPES: ${HORIZONS_MCP_SCOPES:-}
+      MCP_GATEWAY_URL: ${MCP_GATEWAY_URL:-}
+
+      # Optional: sandbox engine (docker|daytona).
+      HORIZONS_SANDBOX_BACKEND: ${HORIZONS_SANDBOX_BACKEND:-}
+      HORIZONS_DOCKER_NETWORK: ${HORIZONS_DOCKER_NETWORK:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - horizons_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: horizons_postgres
+    environment:
+      POSTGRES_USER: horizons
+      POSTGRES_PASSWORD: horizons
+      POSTGRES_DB: horizons
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U horizons -d horizons"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    container_name: horizons_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # helix:
+  # HelixDB does not appear to ship a standard public Docker image as of 2026-02-06.
+  # If you're running Helix separately, set `HELIX_URL` in `.env` and mount networks accordingly.
+  # container_name: horizons_helix
+
+volumes:
+  horizons_data:
+  postgres_data:
+  redis_data:
+

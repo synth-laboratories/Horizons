@@ -108,12 +108,24 @@ async fn run_engine(
         .as_ref()
         .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
 
+    let mut env_vars = req.env_vars;
+    if state.mcp_gateway.is_some() && !env_vars.contains_key("MCP_GATEWAY_URL") {
+        let url = std::env::var("MCP_GATEWAY_URL")
+            .or_else(|_| std::env::var("HORIZONS_MCP_GATEWAY_URL"))
+            .ok();
+        if let Some(url) = url {
+            if !url.trim().is_empty() {
+                env_vars.insert("MCP_GATEWAY_URL".to_string(), url);
+            }
+        }
+    }
+
     let config = SandboxConfig {
         agent: req.agent,
         model: req.model,
         permission_mode: req.permission_mode,
         image: req.image,
-        env_vars: req.env_vars,
+        env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
     };
@@ -144,12 +156,24 @@ async fn start_engine(
         .as_ref()
         .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
 
+    let mut env_vars = req.env_vars;
+    if state.mcp_gateway.is_some() && !env_vars.contains_key("MCP_GATEWAY_URL") {
+        let url = std::env::var("MCP_GATEWAY_URL")
+            .or_else(|_| std::env::var("HORIZONS_MCP_GATEWAY_URL"))
+            .ok();
+        if let Some(url) = url {
+            if !url.trim().is_empty() {
+                env_vars.insert("MCP_GATEWAY_URL".to_string(), url);
+            }
+        }
+    }
+
     let config = SandboxConfig {
         agent: req.agent,
         model: req.model,
         permission_mode: req.permission_mode,
         image: req.image,
-        env_vars: req.env_vars,
+        env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
     };

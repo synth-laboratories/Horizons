@@ -52,8 +52,9 @@ impl<C: SqsApi> QueueBackend for SqsQueueBackend<C> {
             .await?;
         let mut out = Vec::with_capacity(messages.len());
         for (body, receipt) in messages {
-            let evt: Event = serde_json::from_str(&body)
-                .map_err(|e| horizons_core::events::Error::Backend(format!("deserialize event: {e}")))?;
+            let evt: Event = serde_json::from_str(&body).map_err(|e| {
+                horizons_core::events::Error::Backend(format!("deserialize event: {e}"))
+            })?;
             out.push((evt, receipt));
         }
         Ok(out)
@@ -158,7 +159,9 @@ pub mod real {
                 .visibility_timeout(timeout)
                 .send()
                 .await
-                .map_err(|e| horizons_core::events::Error::Backend(format!("sqs visibility: {e}")))?;
+                .map_err(|e| {
+                    horizons_core::events::Error::Backend(format!("sqs visibility: {e}"))
+                })?;
             Ok(())
         }
     }

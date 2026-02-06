@@ -115,4 +115,3 @@ pub struct EvalReport {
     pub case: VerificationCase,
     pub outcome: RewardOutcome,
 }
-

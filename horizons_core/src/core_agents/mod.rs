@@ -3,6 +3,7 @@
 pub mod approvals;
 pub mod executor;
 pub mod mcp;
+pub mod mcp_gateway;
 pub mod models;
 pub mod policies;
 pub mod sandboxed_agent;

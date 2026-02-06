@@ -207,14 +207,8 @@ impl SandboxAgentClient {
     ///
     /// `offset` is the last seen event sequence (exclusive); pass 0 to get all events.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn fetch_events(
-        &self,
-        session_id: &str,
-        offset: u64,
-    ) -> Result<EventsResponse> {
-        let url = format!(
-            "/v1/sessions/{session_id}/events?offset={offset}&include_raw=false"
-        );
+    pub async fn fetch_events(&self, session_id: &str, offset: u64) -> Result<EventsResponse> {
+        let url = format!("/v1/sessions/{session_id}/events?offset={offset}&include_raw=false");
         let req = self.apply_auth(self.http.get(self.url(&url)));
         let resp = req.send().await.map_err(Error::backend_reqwest)?;
         if !resp.status().is_success() {

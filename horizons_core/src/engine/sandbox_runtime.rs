@@ -167,9 +167,8 @@ impl SandboxRuntime {
                                     data.get("permission_id").and_then(|v| v.as_str())
                                 {
                                     tracing::debug!(%pid, "auto-approving permission");
-                                    let _ = client
-                                        .reply_permission(&session_id, pid, "always")
-                                        .await;
+                                    let _ =
+                                        client.reply_permission(&session_id, pid, "always").await;
                                 }
                             }
                         }
@@ -178,11 +177,11 @@ impl SandboxRuntime {
                         // Try to extract final text output from the last completed item.
                         if let Some(data) = event_json.get("data") {
                             if let Some(item) = data.get("item") {
-                                if let Some(content) = item.get("content").and_then(|c| c.as_array())
+                                if let Some(content) =
+                                    item.get("content").and_then(|c| c.as_array())
                                 {
                                     for part in content {
-                                        if part.get("type").and_then(|t| t.as_str())
-                                            == Some("text")
+                                        if part.get("type").and_then(|t| t.as_str()) == Some("text")
                                         {
                                             if let Some(text) =
                                                 part.get("text").and_then(|t| t.as_str())

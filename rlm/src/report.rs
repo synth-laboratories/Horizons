@@ -1,5 +1,5 @@
-use crate::models::EvalReport;
 use crate::Result;
+use crate::models::EvalReport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportFormat {
@@ -13,7 +13,10 @@ pub fn render_markdown_report(report: &EvalReport) -> String {
     s.push_str("# RLM Eval Report\n\n");
     s.push_str(&format!("- report_id: `{}`\n", report.id));
     s.push_str(&format!("- case_id: `{}`\n", report.case.id));
-    s.push_str(&format!("- created_at: `{}`\n", report.created_at.to_rfc3339()));
+    s.push_str(&format!(
+        "- created_at: `{}`\n",
+        report.created_at.to_rfc3339()
+    ));
     s.push_str(&format!(
         "- total_score: `{:.4}`\n",
         report.outcome.total_score_0_to_1

@@ -94,4 +94,3 @@ impl VariantSampler for BasicSampler {
         "basic"
     }
 }
-

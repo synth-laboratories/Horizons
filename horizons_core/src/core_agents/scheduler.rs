@@ -87,7 +87,10 @@ impl AgentScheduler {
         let agents = self.cron_agents.read().await;
 
         for agent in agents.iter() {
-            if self.is_due(&agent.agent_id, &agent.cron_expression, now).await {
+            if self
+                .is_due(&agent.agent_id, &agent.cron_expression, now)
+                .await
+            {
                 tracing::info!(agent_id = %agent.agent_id, "cron agent is due, triggering run");
 
                 let identity = AgentIdentity::System {

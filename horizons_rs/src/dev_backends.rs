@@ -8,6 +8,8 @@ use horizons_core::context_refresh::traits::{
     Connector, ContextRefresh as ContextRefreshTrait, PullResult, RawRecord,
 };
 use horizons_core::core_agents::executor::CoreAgentsExecutor;
+use horizons_core::core_agents::mcp::McpScopeProvider;
+use horizons_core::core_agents::mcp_gateway::{McpGateway, McpServerConfig, McpTransport};
 use horizons_core::core_agents::traits::{
     AgentSpec as CoreAgentSpec, CoreAgents as CoreAgentsTrait,
 };
@@ -17,11 +19,21 @@ use horizons_core::evaluation::engine::EvaluationEngine;
 use horizons_core::evaluation::traits::{RewardSignal, SignalKind, SignalWeight, VerifierConfig};
 #[cfg(feature = "evaluation")]
 use horizons_core::evaluation::wiring::build_rlm_evaluator;
+use horizons_core::events::bus::RedisEventBus;
+use horizons_core::events::config::EventSyncConfig;
+use horizons_core::events::models::{Event, EventQuery, EventStatus, Subscription};
+use horizons_core::events::traits::EventBus;
+use horizons_core::events::{Error as EventsError, Result as EventsResult};
 #[cfg(feature = "memory")]
 use horizons_core::memory::traits::HorizonsMemory;
 #[cfg(feature = "memory")]
 use horizons_core::memory::wiring::{VoyagerBackedHorizonsMemory, build_voyager_memory};
-use horizons_core::models::{AuditEntry, OrgId, PlatformConfig, ProjectDbHandle, ProjectId};
+use horizons_core::models::{
+    AgentIdentity, AuditEntry, OrgId, PlatformConfig, ProjectDbHandle, ProjectId,
+};
+use horizons_core::onboard::config::{PostgresConfig, RedisConfig};
+use horizons_core::onboard::postgres::PostgresCentralDb;
+use horizons_core::onboard::redis::RedisCache;
 use horizons_core::onboard::traits::{
     AuditQuery, Cache, CentralDb, ConnectorCredential, Filestore, GraphStore, ListQuery, OrgRecord,
     ProjectDb, ProjectDbParam, ProjectDbRow, ProjectDbValue, SyncState, SyncStateKey, UserRecord,
@@ -36,9 +48,7 @@ use horizons_core::optimization::traits::{
 #[cfg(feature = "optimization")]
 use horizons_core::optimization::wiring::build_mipro_continual_learning;
 use horizons_core::{Error as CoreError, Result as CoreResult};
-use horizons_core::events::models::{Event, EventQuery, EventStatus, Subscription};
-use horizons_core::events::traits::EventBus;
-use horizons_core::events::{Error as EventsError, Result as EventsResult};
+use sqlx::PgPool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
 use std::collections::{BTreeMap, HashMap};
@@ -50,6 +60,164 @@ use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::server::AppState;
+
+#[derive(Clone)]
+struct StaticMcpScopeProvider {
+    scopes: Vec<String>,
+}
+
+#[async_trait]
+impl McpScopeProvider for StaticMcpScopeProvider {
+    async fn scopes_for(&self, _identity: &AgentIdentity) -> CoreResult<Vec<String>> {
+        Ok(self.scopes.clone())
+    }
+}
+
+fn parse_mcp_transport(v: &serde_json::Value) -> anyhow::Result<McpTransport> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("mcp transport must be an object"))?;
+
+    // Accept either:
+    // 1) {"type":"stdio", "command":"...", "args":[...], "env":{...}}
+    // 2) {"type":"http", "url":"...", "headers":{...}}
+    // 3) {"stdio": {...}} or {"http": {...}}
+    if let Some(t) = obj.get("type").and_then(|v| v.as_str()) {
+        match t {
+            "stdio" => {
+                let command = obj
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("mcp stdio transport missing command"))?
+                    .to_string();
+                let args = obj
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let env = obj
+                    .get("env")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect::<HashMap<String, String>>()
+                    })
+                    .unwrap_or_default();
+                return Ok(McpTransport::Stdio { command, args, env });
+            }
+            "http" => {
+                let url = obj
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("mcp http transport missing url"))?
+                    .to_string();
+                let headers = obj
+                    .get("headers")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect::<HashMap<String, String>>()
+                    })
+                    .unwrap_or_default();
+                return Ok(McpTransport::Http { url, headers });
+            }
+            other => return Err(anyhow::anyhow!("unknown mcp transport type: {other}")),
+        }
+    }
+
+    if let Some(stdio) = obj.get("stdio") {
+        let mut inner = stdio.clone();
+        if let Some(o) = inner.as_object_mut() {
+            o.insert(
+                "type".to_string(),
+                serde_json::Value::String("stdio".to_string()),
+            );
+        }
+        return parse_mcp_transport(&inner);
+    }
+
+    if let Some(http) = obj.get("http") {
+        let mut inner = http.clone();
+        if let Some(o) = inner.as_object_mut() {
+            o.insert(
+                "type".to_string(),
+                serde_json::Value::String("http".to_string()),
+            );
+        }
+        return parse_mcp_transport(&inner);
+    }
+
+    // Fallback: treat the object itself as a transport object with inferred type.
+    if obj.contains_key("command") {
+        let mut v = v.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.insert(
+                "type".to_string(),
+                serde_json::Value::String("stdio".to_string()),
+            );
+        }
+        return parse_mcp_transport(&v);
+    }
+    if obj.contains_key("url") {
+        let mut v = v.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.insert(
+                "type".to_string(),
+                serde_json::Value::String("http".to_string()),
+            );
+        }
+        return parse_mcp_transport(&v);
+    }
+
+    Err(anyhow::anyhow!(
+        "unable to infer mcp transport type (expected stdio/http)"
+    ))
+}
+
+fn parse_mcp_config(s: &str) -> anyhow::Result<Vec<McpServerConfig>> {
+    let v: serde_json::Value = serde_json::from_str(s)?;
+    let mut out = Vec::new();
+
+    match v {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                let obj = item
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("mcp server entry must be an object"))?;
+                let name = obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("mcp server missing name"))?
+                    .to_string();
+                let transport_val = obj
+                    .get("transport")
+                    .ok_or_else(|| anyhow::anyhow!("mcp server missing transport"))?;
+                let transport = parse_mcp_transport(transport_val)?;
+                out.push(McpServerConfig { name, transport });
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (name, cfg) in map {
+                let transport_val = cfg.get("transport").unwrap_or(&cfg);
+                let transport = parse_mcp_transport(transport_val)?;
+                out.push(McpServerConfig { name, transport });
+            }
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "HORIZONS_MCP_CONFIG must be array or object"
+            ));
+        }
+    }
+
+    Ok(out)
+}
 
 #[cfg(feature = "memory")]
 #[derive(Debug)]
@@ -1220,13 +1388,62 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
     let data_dir = data_dir.as_ref().to_path_buf();
     tokio::fs::create_dir_all(&data_dir).await?;
 
-    let central_db = Arc::new(DevCentralDb::new());
+    let central_db_url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("HORIZONS_CENTRAL_DB_URL"))
+        .ok();
+    let redis_url = std::env::var("REDIS_URL")
+        .or_else(|_| std::env::var("HORIZONS_REDIS_URL"))
+        .ok();
+
+    let central_db: Arc<dyn CentralDb> = if let Some(url) = central_db_url.clone() {
+        let cfg = PostgresConfig {
+            url,
+            max_connections: 10,
+            acquire_timeout: Duration::from_secs(5),
+        };
+        let db = PostgresCentralDb::connect(&cfg).await?;
+        db.migrate().await?;
+        Arc::new(db)
+    } else {
+        Arc::new(DevCentralDb::new())
+    };
     let project_db = Arc::new(DevProjectDb::new(data_dir.join("project_dbs")).await?);
     let filestore = Arc::new(DevFilestore::new(data_dir.join("files")).await?);
-    let cache = Arc::new(DevCache::new());
+    let cache: Arc<dyn Cache> = if let Some(url) = redis_url.clone() {
+        let cfg = RedisConfig {
+            url,
+            key_prefix: None,
+        };
+        Arc::new(RedisCache::new(&cfg).await?)
+    } else {
+        Arc::new(DevCache::new())
+    };
     let graph_store = Arc::new(DevGraphStore::new());
-    let vector_store = Arc::new(DevVectorStore::new());
-    let event_bus = Arc::new(DevEventBus::new());
+    let vector_store: Arc<dyn VectorStore> = if let Some(url) =
+        std::env::var("HORIZONS_VECTOR_DB_URL")
+            .ok()
+            .or_else(|| central_db_url.clone())
+    {
+        let dim = std::env::var("HORIZONS_VECTOR_DIM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64);
+        let pool = PgPool::connect(&url).await?;
+        Arc::new(horizons_integrations::vector::pgvector::PgVectorStore::new(
+            pool, dim,
+        ))
+    } else {
+        Arc::new(DevVectorStore::new())
+    };
+    let event_bus: Arc<dyn EventBus> =
+        if let (Some(pg), Some(redis)) = (central_db_url.clone(), redis_url.clone()) {
+            let mut cfg = EventSyncConfig::default();
+            cfg.postgres_url = pg;
+            cfg.redis_url = redis;
+            Arc::new(RedisEventBus::connect(cfg).await?)
+        } else {
+            Arc::new(DevEventBus::new())
+        };
 
     let context_refresh: Arc<dyn ContextRefreshTrait> = Arc::new(ContextRefreshEngine::new(
         central_db.clone(),
@@ -1244,6 +1461,25 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         None,
     ));
     core_agents.register_agent(Arc::new(DevNoopAgent)).await?;
+
+    let mcp_gateway: Option<Arc<McpGateway>> = if let Ok(cfg) = std::env::var("HORIZONS_MCP_CONFIG")
+    {
+        let scopes = std::env::var("HORIZONS_MCP_SCOPES")
+            .ok()
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let scope_provider = Arc::new(StaticMcpScopeProvider { scopes });
+        let gateway = Arc::new(McpGateway::new(scope_provider));
+        let servers = parse_mcp_config(&cfg)?;
+        gateway.reconfigure(servers).await?;
+        Some(gateway)
+    } else {
+        None
+    };
 
     #[cfg(feature = "memory")]
     let memory: Arc<dyn HorizonsMemory> = {
@@ -1328,22 +1564,28 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
     let sandbox_runtime = match std::env::var("HORIZONS_SANDBOX_BACKEND").ok().as_deref() {
         Some("docker") => {
             let docker_network = std::env::var("HORIZONS_DOCKER_NETWORK").ok();
-            let backend = Arc::new(
-                horizons_core::engine::docker_backend::DockerBackend::new(docker_network),
-            );
-            Some(Arc::new(horizons_core::engine::sandbox_runtime::SandboxRuntime::new(backend)))
+            let backend = Arc::new(horizons_core::engine::docker_backend::DockerBackend::new(
+                docker_network,
+            ));
+            Some(Arc::new(
+                horizons_core::engine::sandbox_runtime::SandboxRuntime::new(backend),
+            ))
         }
         Some("daytona") => {
             let api_url = std::env::var("DAYTONA_API_URL").ok();
-            let api_key = std::env::var("DAYTONA_API_KEY")
-                .unwrap_or_else(|_| "dev-key".to_string());
-            let backend = Arc::new(
-                horizons_core::engine::daytona_backend::DaytonaBackend::new(api_url, api_key),
-            );
-            Some(Arc::new(horizons_core::engine::sandbox_runtime::SandboxRuntime::new(backend)))
+            let api_key =
+                std::env::var("DAYTONA_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+            let backend = Arc::new(horizons_core::engine::daytona_backend::DaytonaBackend::new(
+                api_url, api_key,
+            ));
+            Some(Arc::new(
+                horizons_core::engine::sandbox_runtime::SandboxRuntime::new(backend),
+            ))
         }
         _ => {
-            tracing::info!("sandbox runtime not configured (set HORIZONS_SANDBOX_BACKEND=docker|daytona to enable)");
+            tracing::info!(
+                "sandbox runtime not configured (set HORIZONS_SANDBOX_BACKEND=docker|daytona to enable)"
+            );
             None
         }
     };
@@ -1358,6 +1600,7 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         event_bus,
         context_refresh,
         core_agents,
+        mcp_gateway,
         sandbox_runtime,
         #[cfg(feature = "memory")]
         memory,

@@ -4,9 +4,9 @@ pub mod context_refresh;
 pub mod core_agents;
 pub mod engine;
 pub mod error;
-pub mod events;
 #[cfg(feature = "evaluation")]
 pub mod evaluation;
+pub mod events;
 #[cfg(feature = "memory")]
 pub mod memory;
 pub mod models;

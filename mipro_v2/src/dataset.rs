@@ -25,10 +25,7 @@ impl Dataset {
                 "dataset must contain at least one example".to_string(),
             ));
         }
-        Ok(Self {
-            id,
-            examples,
-        })
+        Ok(Self { id, examples })
     }
 
     #[tracing::instrument]
@@ -62,7 +59,9 @@ impl Dataset {
             ));
         }
 
-        let holdout_n = ((n as f32) * holdout_ratio).round().clamp(1.0, (n - 1) as f32) as usize;
+        let holdout_n = ((n as f32) * holdout_ratio)
+            .round()
+            .clamp(1.0, (n - 1) as f32) as usize;
 
         let mut idxs: Vec<usize> = (0..n).collect();
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
@@ -71,11 +70,17 @@ impl Dataset {
         let (holdout_idxs, train_idxs) = idxs.split_at(holdout_n);
         let holdout = Dataset {
             id: format!("{}:holdout", self.id),
-            examples: holdout_idxs.iter().map(|&i| self.examples[i].clone()).collect(),
+            examples: holdout_idxs
+                .iter()
+                .map(|&i| self.examples[i].clone())
+                .collect(),
         };
         let train = Dataset {
             id: format!("{}:train", self.id),
-            examples: train_idxs.iter().map(|&i| self.examples[i].clone()).collect(),
+            examples: train_idxs
+                .iter()
+                .map(|&i| self.examples[i].clone())
+                .collect(),
         };
         Ok((train, holdout))
     }

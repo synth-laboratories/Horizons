@@ -101,10 +101,7 @@ impl DaytonaBackend {
 
     /// Get the preview URL for a port on a Daytona sandbox.
     async fn get_preview_url(&self, sandbox_id: &str, port: u16) -> Result<String> {
-        let url = format!(
-            "{}/api/sandboxes/{sandbox_id}/preview/{port}",
-            self.api_url
-        );
+        let url = format!("{}/api/sandboxes/{sandbox_id}/preview/{port}", self.api_url);
         let resp = self
             .http
             .get(&url)
@@ -115,9 +112,7 @@ impl DaytonaBackend {
 
         if !resp.status().is_success() {
             // Fall back to constructing a URL from the sandbox ID.
-            return Ok(format!(
-                "https://{port}-{sandbox_id}.preview.daytona.app"
-            ));
+            return Ok(format!("https://{port}-{sandbox_id}.preview.daytona.app"));
         }
 
         #[derive(Deserialize)]

@@ -1,6 +1,6 @@
 [package]
 name = "horizons_integrations"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license-file = "LICENSE.md"
 
@@ -15,6 +15,8 @@ serde_json = "1.0.139"
 tracing = "0.1.41"
 aws-sdk-sqs = { version = "1.71.0", default-features = false, features = ["behavior-version-latest", "rustls"] }
 lapin = { version = "2.3.4", default-features = false, features = ["rustls"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "chrono", "uuid"], optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
 
 [dev-dependencies]
 wiremock = "0.6.5"
@@ -30,5 +32,23 @@ optimization = ["horizons_core/optimization"]
 evaluation = ["horizons_core/evaluation"]
 linkedin = []
 jira = []
+gmail = []
+slack = []
+github = []
+linear = []
+hubspot = []
 sqs = []
 rabbitmq = []
+pgvector = ["dep:sqlx", "dep:tokio"]
+all = [
+  "jira",
+  "linkedin",
+  "gmail",
+  "slack",
+  "github",
+  "linear",
+  "hubspot",
+  "sqs",
+  "rabbitmq",
+  "pgvector",
+]

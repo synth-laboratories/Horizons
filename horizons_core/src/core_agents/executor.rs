@@ -4,6 +4,8 @@ use crate::core_agents::models::{
 };
 use crate::core_agents::policies::PolicyStore;
 use crate::core_agents::traits::{ActionApprover, AgentSpec, CoreAgents, ReviewDecision};
+use crate::events::models::{Event, EventDirection};
+use crate::events::traits::EventBus;
 use crate::models::{AgentIdentity, AuditEntry, OrgId, ProjectDbHandle, ProjectId};
 use crate::onboard::traits::{
     CentralDb, ProjectDb, ProjectDbParam, ProjectDbRow, ProjectDbValue, ensure_handle_org,
@@ -11,8 +13,6 @@ use crate::onboard::traits::{
 use crate::{Error, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use crate::events::models::{Event, EventDirection};
-use crate::events::traits::EventBus;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

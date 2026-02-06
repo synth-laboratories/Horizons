@@ -4,11 +4,11 @@
 //! and run like any other agent. When executed, it provisions a sandbox,
 //! runs the coding agent inside, and converts the output into `ActionProposal`s.
 
+use crate::Result;
 use crate::core_agents::models::{ActionProposal, AgentContext, RiskLevel};
 use crate::core_agents::traits::AgentSpec;
 use crate::engine::models::{AgentKind, PermissionMode, SandboxConfig};
 use crate::engine::sandbox_runtime::SandboxRuntime;
-use crate::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -102,12 +102,26 @@ impl SandboxedAgent {
 
     /// Build the `SandboxConfig` from this agent's settings.
     fn build_config(&self) -> SandboxConfig {
+        let mut env_vars = self.env_vars.clone();
+        // If an MCP gateway is configured in the parent environment, pass it through
+        // to the sandbox so in-sandbox tools can proxy MCP calls.
+        if !env_vars.contains_key("MCP_GATEWAY_URL") {
+            let url = std::env::var("MCP_GATEWAY_URL")
+                .or_else(|_| std::env::var("HORIZONS_MCP_GATEWAY_URL"))
+                .ok();
+            if let Some(url) = url {
+                if !url.trim().is_empty() {
+                    env_vars.insert("MCP_GATEWAY_URL".to_string(), url);
+                }
+            }
+        }
+
         SandboxConfig {
             agent: self.agent_kind,
             model: self.model.clone(),
             permission_mode: self.permission_mode,
             image: self.image.clone(),
-            env_vars: self.env_vars.clone(),
+            env_vars,
             timeout_seconds: self.timeout_seconds,
             workdir: self.workdir.clone(),
         }

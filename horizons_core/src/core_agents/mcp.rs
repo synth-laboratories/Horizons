@@ -10,6 +10,8 @@ pub struct McpToolCall {
     pub tool_name: String,
     pub arguments: serde_json::Value,
     pub requested_scopes: Vec<String>,
+    /// Identity used for scope authorization decisions.
+    pub identity: AgentIdentity,
     pub request_id: String,
     pub requested_at: DateTime<Utc>,
 }
@@ -20,6 +22,7 @@ impl McpToolCall {
         tool_name: impl Into<String> + std::fmt::Debug,
         arguments: serde_json::Value,
         requested_scopes: Vec<String>,
+        identity: AgentIdentity,
         request_id: impl Into<String> + std::fmt::Debug,
         requested_at: Option<DateTime<Utc>>,
     ) -> Result<Self> {
@@ -40,6 +43,7 @@ impl McpToolCall {
             tool_name,
             arguments,
             requested_scopes,
+            identity,
             request_id,
             requested_at: requested_at.unwrap_or_else(Utc::now),
         })

@@ -42,9 +42,9 @@ pub struct LlmGrade {
 }
 
 pub use models::{
-    EvalReport, RewardOutcome, RewardSignal, SignalScore, SignalWeight, VerifierConfig,
-    VerificationCase, SignalKind,
+    EvalReport, RewardOutcome, RewardSignal, SignalKind, SignalScore, SignalWeight,
+    VerificationCase, VerifierConfig,
 };
-pub use report::{render_markdown_report, ReportFormat};
+pub use report::{ReportFormat, render_markdown_report};
 pub use signals::Signals;
 pub use verifier::RlmVerifier;

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
-use super::models::{Event, EventQuery, EventStatus, Subscription};
 use super::Result;
+use super::models::{Event, EventQuery, EventStatus, Subscription};
 
 #[async_trait]
 pub trait EventBus: Send + Sync {

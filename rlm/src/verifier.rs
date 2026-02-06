@@ -1,4 +1,6 @@
-use crate::models::{EvalReport, RewardOutcome, RewardSignal, SignalScore, VerifierConfig, VerificationCase};
+use crate::models::{
+    EvalReport, RewardOutcome, RewardSignal, SignalScore, VerificationCase, VerifierConfig,
+};
 use crate::signals::Signals;
 use crate::{LlmClient, Result, RlmError};
 use chrono::Utc;
@@ -13,7 +15,11 @@ pub struct RlmVerifier {
 
 impl RlmVerifier {
     #[tracing::instrument(skip_all)]
-    pub fn new(cfg: VerifierConfig, signals: Vec<RewardSignal>, llm: Option<Arc<dyn LlmClient>>) -> Result<Self> {
+    pub fn new(
+        cfg: VerifierConfig,
+        signals: Vec<RewardSignal>,
+        llm: Option<Arc<dyn LlmClient>>,
+    ) -> Result<Self> {
         cfg.validate()?;
         let signals = Signals::new(signals)?;
         signals.validate()?;
@@ -32,10 +38,7 @@ impl RlmVerifier {
 
     #[tracing::instrument(skip_all)]
     pub async fn verify(&self, case: VerificationCase) -> Result<RewardOutcome> {
-        let scores = self
-            .signals
-            .score_all(&case, self.llm.as_deref())
-            .await?;
+        let scores = self.signals.score_all(&case, self.llm.as_deref()).await?;
         aggregate(&self.cfg, scores)
     }
 
@@ -93,4 +96,3 @@ fn aggregate(cfg: &VerifierConfig, signal_scores: Vec<SignalScore>) -> Result<Re
         reasoning,
     })
 }
-

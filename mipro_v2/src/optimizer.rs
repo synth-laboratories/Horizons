@@ -56,7 +56,12 @@ impl Optimizer {
         for iter in 0..cfg.max_iterations {
             let candidates = self
                 .sampler
-                .generate_variants(&best_policy, Some(self.evaluator.llm().as_ref()), cfg.num_candidates, cfg.seed.wrapping_add(iter as u64))
+                .generate_variants(
+                    &best_policy,
+                    Some(self.evaluator.llm().as_ref()),
+                    cfg.num_candidates,
+                    cfg.seed.wrapping_add(iter as u64),
+                )
                 .await?;
             if candidates.is_empty() {
                 return Err(MiproError::Unexpected(

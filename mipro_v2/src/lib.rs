@@ -32,7 +32,7 @@ pub enum MiproError {
 }
 
 pub use dataset::{Dataset, Example};
-pub use evaluator::{EvalMetric, Evaluator, ExactMatchMetric, EvalSummary};
+pub use evaluator::{EvalMetric, EvalSummary, Evaluator, ExactMatchMetric};
 pub use models::{
     EvalMetricResult, MiproConfig, OptimizationHistoryEntry, OptimizationResult, Policy,
     PromptVariant,

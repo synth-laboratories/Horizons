@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures_util::StreamExt;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use super::config::EventSyncConfig;

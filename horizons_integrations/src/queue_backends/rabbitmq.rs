@@ -50,8 +50,9 @@ impl<C: AmqpApi> QueueBackend for RabbitMqBackend<C> {
         let deliveries = self.client.receive(&self.queue, max as u16).await?;
         let mut out = Vec::with_capacity(deliveries.len());
         for (body, tag) in deliveries {
-            let evt: Event = serde_json::from_slice(&body)
-                .map_err(|e| horizons_core::events::Error::Backend(format!("deserialize event: {e}")))?;
+            let evt: Event = serde_json::from_slice(&body).map_err(|e| {
+                horizons_core::events::Error::Backend(format!("deserialize event: {e}"))
+            })?;
             out.push((evt, tag));
         }
         Ok(out)
@@ -74,7 +75,9 @@ pub mod real {
     use super::AmqpApi;
     use futures_util::StreamExt;
     use horizons_core::events::Result;
-    use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, options::*, types::FieldTable};
+    use lapin::{
+        BasicProperties, Channel, Connection, ConnectionProperties, options::*, types::FieldTable,
+    };
     use tracing::instrument;
 
     #[derive(Clone)]
@@ -129,8 +132,9 @@ pub mod real {
                 .map_err(|e| horizons_core::events::Error::Backend(format!("amqp consume: {e}")))?;
             let mut out = Vec::new();
             while let Some(delivery) = consumer.next().await {
-                let d = delivery
-                    .map_err(|e| horizons_core::events::Error::Backend(format!("amqp delivery: {e}")))?;
+                let d = delivery.map_err(|e| {
+                    horizons_core::events::Error::Backend(format!("amqp delivery: {e}"))
+                })?;
                 out.push((d.data.clone(), d.delivery_tag.to_string()));
                 if out.len() as u16 >= max {
                     break;

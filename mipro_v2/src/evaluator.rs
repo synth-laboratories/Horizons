@@ -1,5 +1,5 @@
 use crate::dataset::{Dataset, Example};
-use crate::models::{require_finite_score, Policy};
+use crate::models::{Policy, require_finite_score};
 use crate::{LlmClient, MiproError, Result};
 use async_trait::async_trait;
 
@@ -18,9 +18,17 @@ impl EvalMetric for ExactMatchMetric {
     async fn score(&self, example: &Example, output: &str) -> Result<f32> {
         let expected = match &example.expected {
             serde_json::Value::String(s) => s.as_str(),
-            _ => return Err(MiproError::InvalidArgument("expected must be a string for ExactMatchMetric".to_string())),
+            _ => {
+                return Err(MiproError::InvalidArgument(
+                    "expected must be a string for ExactMatchMetric".to_string(),
+                ));
+            }
         };
-        Ok(if output.trim() == expected.trim() { 1.0 } else { 0.0 })
+        Ok(if output.trim() == expected.trim() {
+            1.0
+        } else {
+            0.0
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -58,7 +66,9 @@ impl Evaluator {
     #[tracing::instrument(skip_all)]
     pub async fn evaluate_policy(&self, policy: &Policy, dataset: &Dataset) -> Result<EvalSummary> {
         if dataset.examples.is_empty() {
-            return Err(MiproError::InvalidArgument("dataset has no examples".to_string()));
+            return Err(MiproError::InvalidArgument(
+                "dataset has no examples".to_string(),
+            ));
         }
 
         let mut scores = Vec::with_capacity(dataset.examples.len());
@@ -76,4 +86,3 @@ impl Evaluator {
         })
     }
 }
-

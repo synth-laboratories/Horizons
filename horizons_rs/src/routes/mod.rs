@@ -12,6 +12,7 @@ pub mod events;
 pub mod filestore;
 pub mod graph;
 pub mod health;
+pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
 pub mod onboard;
@@ -40,6 +41,7 @@ fn api_v1_router() -> Router {
             .merge(agents::router())
             .merge(actions::router())
             .merge(engine::router())
+            .merge(mcp::router())
             .merge(feature_routers())
             .merge(audit::router())
             .merge(config::router()),

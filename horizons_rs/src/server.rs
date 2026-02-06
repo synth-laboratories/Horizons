@@ -3,10 +3,12 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use horizons_core::context_refresh::traits::ContextRefresh;
 use horizons_core::core_agents::executor::CoreAgentsExecutor;
+use horizons_core::core_agents::mcp_gateway::McpGateway;
 use horizons_core::engine::models::SandboxHandle;
 use horizons_core::engine::sandbox_runtime::SandboxRuntime;
 #[cfg(feature = "evaluation")]
 use horizons_core::evaluation::engine::EvaluationEngine;
+use horizons_core::events::traits::EventBus;
 #[cfg(feature = "memory")]
 use horizons_core::memory::traits::HorizonsMemory;
 use horizons_core::onboard::traits::{
@@ -14,7 +16,6 @@ use horizons_core::onboard::traits::{
 };
 #[cfg(feature = "optimization")]
 use horizons_core::optimization::engine::OptimizationEngine;
-use horizons_core::events::traits::EventBus;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub event_bus: Arc<dyn EventBus>,
     pub context_refresh: Arc<dyn ContextRefresh>,
     pub core_agents: Arc<CoreAgentsExecutor>,
+    /// MCP gateway for tool proxying (optional; configured via env).
+    pub mcp_gateway: Option<Arc<McpGateway>>,
     /// Sandbox runtime for executing coding agents in containers.
     /// None if the sandbox engine is not configured.
     pub sandbox_runtime: Option<Arc<SandboxRuntime>>,
@@ -62,6 +65,7 @@ impl AppState {
         event_bus: Arc<dyn EventBus>,
         context_refresh: Arc<dyn ContextRefresh>,
         core_agents: Arc<CoreAgentsExecutor>,
+        mcp_gateway: Option<Arc<McpGateway>>,
         sandbox_runtime: Option<Arc<SandboxRuntime>>,
         #[cfg(feature = "memory")] memory: Arc<dyn HorizonsMemory>,
         #[cfg(feature = "optimization")] optimization: Arc<OptimizationEngine>,
@@ -77,6 +81,7 @@ impl AppState {
             event_bus,
             context_refresh,
             core_agents,
+            mcp_gateway,
             sandbox_runtime,
             sandbox_handles: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "memory")]

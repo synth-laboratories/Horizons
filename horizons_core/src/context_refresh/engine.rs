@@ -5,6 +5,8 @@ use crate::context_refresh::models::{
 use crate::context_refresh::traits::{
     Connector, ContextRefresh, PullResult, RefreshResult, RefreshStatus,
 };
+use crate::events::models::{Event, EventDirection};
+use crate::events::traits::EventBus;
 use crate::models::{AgentIdentity, OrgId};
 use crate::onboard::traits::{
     CentralDb, ListQuery, ProjectDb, ProjectDbParam, SyncState, SyncStateKey, ensure_handle_org,
@@ -12,8 +14,6 @@ use crate::onboard::traits::{
 use crate::{Error, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use crate::events::models::{Event, EventDirection};
-use crate::events::traits::EventBus;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
