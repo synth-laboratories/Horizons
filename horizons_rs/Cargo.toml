@@ -39,6 +39,7 @@ default = []
 memory = ["horizons_core/memory", "dep:voyager"]
 optimization = ["horizons_core/optimization", "dep:mipro_v2"]
 evaluation = ["horizons_core/evaluation"]
+graph_monty = ["horizons_graph/monty"]
 all = ["memory", "optimization", "evaluation"]
 
 [dev-dependencies]

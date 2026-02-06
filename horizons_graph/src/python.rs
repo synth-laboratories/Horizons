@@ -111,7 +111,7 @@ fn selected_backend() -> PythonBackend {
 
 #[cfg(feature = "monty")]
 fn run_python_monty(args: &Value) -> Result<Value> {
-    use monty::{MontyObject, MontyRun, NoLimitTracker, StdPrint};
+    use monty::{DictPairs, ExcType, MontyObject, MontyRun, NoLimitTracker, StdPrint};
 
     let args_obj = args
         .as_object()
@@ -138,7 +138,11 @@ fn run_python_monty(args: &Value) -> Result<Value> {
                 ));
             }
             let input_literal = to_python_literal(&inputs)?;
-            let fn_name = extract_function_name(fn_str).unwrap_or("main");
+            let fn_name = args_obj
+                .get("fn_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| extract_function_name(fn_str))
+                .unwrap_or("main");
             format!(
                 r#"{fn_str}
 _inputs = {input_literal}
@@ -156,7 +160,11 @@ _inputs = {input_literal}
                 .ok_or_else(|| GraphError::bad_request("reduce_fn missing fn_str"))?;
             let results = args_obj.get("results").cloned().unwrap_or(json!([]));
             let results_literal = to_python_literal(&results)?;
-            let fn_name = extract_function_name(fn_str).unwrap_or("main");
+            let fn_name = args_obj
+                .get("fn_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| extract_function_name(fn_str))
+                .unwrap_or("main");
             format!(
                 r#"{fn_str}
 _results = {results_literal}
@@ -207,9 +215,111 @@ node_output = {node_output_literal}
         .run(Vec::<MontyObject>::new(), NoLimitTracker, &mut printer)
         .map_err(|err| GraphError::bad_request(format!("monty execution failed: {err:?}")))?;
 
-    // MontyObject's exact shape is intentionally not depended on here.
-    // For graph nodes that need structured JSON outputs, prefer the subprocess backend.
-    Ok(Value::String(format!("{result:?}")))
+    fn monty_object_to_json(value: &MontyObject) -> Result<Value> {
+        match value {
+            MontyObject::Ellipsis => Ok(json!({ "$ellipsis": true })),
+            MontyObject::None => Ok(Value::Null),
+            MontyObject::Bool(b) => Ok(Value::Bool(*b)),
+            MontyObject::Int(i) => Ok(json!(i)),
+            MontyObject::BigInt(bi) => Ok(Value::String(bi.to_string())),
+            MontyObject::Float(f) => serde_json::Number::from_f64(*f)
+                .map(Value::Number)
+                .ok_or_else(|| {
+                    GraphError::bad_request("monty float result is not a finite JSON number")
+                }),
+            MontyObject::String(s) => Ok(Value::String(s.clone())),
+            MontyObject::Bytes(bytes) => Ok(Value::Array(
+                bytes
+                    .iter()
+                    .map(|b| Value::Number(serde_json::Number::from(*b)))
+                    .collect(),
+            )),
+            MontyObject::List(items)
+            | MontyObject::Tuple(items)
+            | MontyObject::Set(items)
+            | MontyObject::FrozenSet(items) => Ok(Value::Array(
+                items
+                    .iter()
+                    .map(monty_object_to_json)
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            MontyObject::Dict(pairs) => dict_pairs_to_json_object(pairs),
+            MontyObject::NamedTuple {
+                type_name,
+                field_names,
+                values,
+            } => {
+                let mut out = Map::new();
+                out.insert("$named_tuple".to_string(), Value::Bool(true));
+                out.insert("type_name".to_string(), Value::String(type_name.clone()));
+
+                let mut fields = Map::new();
+                for (name, value) in field_names.iter().zip(values.iter()) {
+                    fields.insert(name.clone(), monty_object_to_json(value)?);
+                }
+                out.insert("fields".to_string(), Value::Object(fields));
+                Ok(Value::Object(out))
+            }
+            MontyObject::Exception { exc_type, arg } => Ok(json!({
+                "$exception": {
+                    "type": exc_type_to_string(*exc_type),
+                    "arg": arg,
+                }
+            })),
+            MontyObject::Type(t) => Ok(Value::String(format!("<class '{t}'>"))),
+            MontyObject::BuiltinFunction(_) => Ok(Value::String(value.py_repr())),
+            MontyObject::Path(p) => Ok(Value::String(p.clone())),
+            MontyObject::Dataclass {
+                name,
+                type_id,
+                field_names,
+                attrs,
+                methods,
+                frozen,
+            } => {
+                let mut out = Map::new();
+                out.insert("$dataclass".to_string(), Value::Bool(true));
+                out.insert("name".to_string(), Value::String(name.clone()));
+                out.insert("type_id".to_string(), json!(type_id));
+                out.insert(
+                    "field_names".to_string(),
+                    Value::Array(field_names.iter().map(|s| Value::String(s.clone())).collect()),
+                );
+                out.insert("attrs".to_string(), dict_pairs_to_json_object(attrs)?);
+                out.insert(
+                    "methods".to_string(),
+                    Value::Array(methods.iter().map(|s| Value::String(s.clone())).collect()),
+                );
+                out.insert("frozen".to_string(), Value::Bool(*frozen));
+                Ok(Value::Object(out))
+            }
+            MontyObject::Repr(s) => Ok(json!({ "$repr": s })),
+            MontyObject::Cycle(_id, placeholder) => Ok(json!({ "$cycle": placeholder })),
+        }
+    }
+
+    fn dict_pairs_to_json_object(pairs: &DictPairs) -> Result<Value> {
+        let mut out = Map::new();
+        for (k, v) in pairs {
+            let key = match k {
+                MontyObject::String(s) => s.clone(),
+                _ => {
+                    return Err(GraphError::bad_request(
+                        "monty dict output must have string keys to convert to JSON object",
+                    ));
+                }
+            };
+            out.insert(key, monty_object_to_json(v)?);
+        }
+        Ok(Value::Object(out))
+    }
+
+    fn exc_type_to_string(exc_type: ExcType) -> String {
+        let s: &'static str = exc_type.into();
+        s.to_string()
+    }
+
+    monty_object_to_json(&result)
 }
 
 #[cfg(feature = "monty")]
