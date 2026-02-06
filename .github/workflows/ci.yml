@@ -14,7 +14,7 @@ permissions:
 jobs:
   rust:
     name: Rust
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'synth-laboratories/Horizons' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +43,7 @@ jobs:
 
   python:
     name: Python
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'synth-laboratories/Horizons' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: horizons_py
@@ -65,7 +65,7 @@ jobs:
 
   typescript:
     name: TypeScript
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'synth-laboratories/Horizons' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: horizons_ts
