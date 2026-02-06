@@ -1,0 +1,75 @@
+Horizons Pre-Commit Audit: Open Issues
+=======================================
+Generated: 2026-02-05
+
+CRITICAL
+--------
+
+1. SDKs missing Engine/Sandbox endpoints -> fix
+   Both Python (horizons_py/) and TypeScript (horizons_ts/) SDKs have zero
+   coverage of the new /api/v1/engine/* endpoints (run, start, events SSE,
+   release, health). Users cannot programmatically kick off sandboxed agents
+   from SDK code.
+   Affected files:
+     - horizons_py/horizons/  (needs engine.py)
+     - horizons_ts/src/       (needs engine.ts)
+
+-> this can wait unitl next rleease - let's plan  a follow-on release withh this and other
+2. No production VectorStore backend
+   The VectorStore trait is defined in horizons_core/src/onboard/traits.rs
+   and DevVectorStore exists in dev_backends.rs (in-memory HashMap with
+   cosine similarity). No production implementation (Qdrant, Pinecone,
+   pgvector, etc.) exists. Voyager memory only works in dev mode.
+   Affected files:
+     - horizons_core/src/onboard/ (needs e.g. qdrant.rs or pgvector.rs)
+
+
+IMPORTANT
+---------
+-> these can wait 
+3. Missing connectors (5 of 7 specced)
+   Spec lists 7 connectors. Only 2 implemented:
+     DONE:    Jira, LinkedIn
+     MISSING: Gmail, Slack, Linear, GitHub, HubSpot/CRM
+   Affected files:
+     - horizons_integrations/src/connectors/ (needs gmail.rs, slack.rs,
+       linear.rs, github.rs, hubspot.rs)
+-> this sohould be prioritzed, check how archiepolago stuff in fhodes does it
+4. MCP server integration incomplete
+   horizons_core/src/core_agents/mcp.rs has MCP client traits and
+   scope-checking logic but no actual MCP JSON-RPC server or tool
+   registration. Defines the interface for MCP auth-based approvals
+   but does not connect to a real MCP server.
+   Affected files:
+     - horizons_core/src/core_agents/mcp.rs
+-> yep
+5. Outbound webhook delivery missing
+   Event Router (events/router.rs) handles routing logic. Inbound webhook
+   receiver (events/webhook.rs) works. But there is no outbound webhook
+   HTTP sender that POSTs events to registered webhook URLs.
+   Affected files:
+     - horizons_core/src/events/ (needs outbound_webhook.rs or similar)
+
+
+MODERATE
+--------
+-> add
+6. TypeScript SDK missing query()/execute() on Projects
+   Python SDK has query() and execute() methods for running SQL on project
+   DBs. TypeScript SDK is missing these.
+   Affected files:
+     - horizons_ts/src/onboard.ts
+-> dockerfile for now
+7. No production deployment configs beyond basic Dockerfile
+   Dockerfile and docker-compose.yml work for dev. Missing:
+     - Kubernetes manifests
+     - Production environment variable templates
+     - Multi-service docker-compose (Horizons + Postgres + Redis + HelixDB)
+     - Deployment runbooks
+-> make explicit
+8. Dockerfile builds without --features all
+   The Dockerfile runs `cargo build --release -p horizons_rs` without
+   --features all, so memory/optimization/evaluation modules are excluded
+   from the Docker image. May be intentional but should be explicit.
+   Affected files:
+     - Dockerfile

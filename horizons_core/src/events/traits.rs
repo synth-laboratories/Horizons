@@ -1,0 +1,38 @@
+use async_trait::async_trait;
+
+use super::models::{Event, EventQuery, EventStatus, Subscription};
+use super::Result;
+
+#[async_trait]
+pub trait EventBus: Send + Sync {
+    /// Publish an event (inbound or outbound).
+    ///
+    /// Implementations must provide at-least-once delivery.
+    async fn publish(&self, event: Event) -> Result<String>; // event_id
+
+    /// Subscribe to events matching a topic pattern.
+    async fn subscribe(&self, sub: Subscription) -> Result<String>; // sub_id
+
+    /// Unsubscribe.
+    async fn unsubscribe(&self, org_id: &str, sub_id: &str) -> Result<()>;
+
+    /// Acknowledge successful processing.
+    async fn ack(&self, org_id: &str, event_id: &str) -> Result<()>;
+
+    /// Negative-acknowledge (retry or dead-letter).
+    async fn nack(&self, org_id: &str, event_id: &str, reason: &str) -> Result<()>;
+
+    /// Query events (for replay, debugging, audit).
+    async fn query(&self, filter: EventQuery) -> Result<Vec<Event>>;
+}
+
+#[async_trait]
+pub trait EventStore: Send + Sync {
+    async fn append(&self, event: &Event) -> Result<()>;
+
+    async fn get(&self, org_id: &str, event_id: &str) -> Result<Option<Event>>;
+
+    async fn query(&self, filter: &EventQuery) -> Result<Vec<Event>>;
+
+    async fn update_status(&self, org_id: &str, event_id: &str, status: EventStatus) -> Result<()>;
+}

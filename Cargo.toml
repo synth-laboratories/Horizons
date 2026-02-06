@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = [
+  "horizons_core",
+  "horizons_rs",
+  "horizons_integrations",
+  "voyager",
+  "mipro_v2",
+  "rlm",
+]

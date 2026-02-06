@@ -1,0 +1,56 @@
+[package]
+name = "horizons_core"
+version = "0.1.0"
+edition = "2024"
+license-file = "LICENSE.md"
+
+[dependencies]
+async-trait = "0.1.89"
+axum = { version = "0.8", features = ["macros", "json"] }
+bytes = { version = "1.10.1", features = ["serde"] }
+chrono = { version = "0.4.40", features = ["serde"] }
+dashmap = "6"
+futures-core = "0.3.31"
+futures-util = "0.3.31"
+hex = "0.4"
+hmac = "0.12"
+aws-config = { version = "1.8.12", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
+aws-credential-types = "1.2.11"
+aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
+libsql = { version = "0.5.0", features = ["serde"] }
+redis = { version = "0.27.6", features = ["aio", "tokio-comp", "connection-manager"] }
+reqwest = { version = "0.11.27", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.218", features = ["derive"] }
+serde_bytes = "0.11.15"
+serde_json = "1.0.139"
+sha2 = "0.10"
+sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
+thiserror = "2.0.11"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "0.1.17"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+ulid = { version = "1", features = ["serde"] }
+uuid = { version = "1.15.1", features = ["serde", "v4"] }
+prost = "0.13"
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+rand = "0.8"
+regex = "1"
+cron = "0.15"
+sandbox-agent-universal-agent-schema = { git = "https://github.com/rivet-dev/sandbox-agent", rev = "8a31519" }
+voyager = { path = "../voyager", optional = true }
+mipro_v2 = { path = "../mipro_v2", optional = true }
+rlm = { path = "../rlm", optional = true }
+
+[features]
+default = []
+memory = ["dep:voyager"]
+optimization = ["dep:mipro_v2"]
+evaluation = ["dep:rlm"]
+
+[dev-dependencies]
+serde_json = "1.0.139"
+tempfile = "3.17.1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+wiremock = "0.6.5"

@@ -1,0 +1,28 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Internal development docs – do not publish
+/dev/
+/final_specs/
+
+# Tests live in the testing/ repo
+/tests/

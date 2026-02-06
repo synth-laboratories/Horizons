@@ -1,0 +1,11 @@
+target/
+dev/
+final_specs/
+tests/
+.git/
+.DS_Store
+*.pem
+*.key
+*.p12
+.env
+.env.*

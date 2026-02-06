@@ -1,0 +1,13 @@
+services:
+  horizons:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - horizons_data:/data
+    environment:
+      HORIZONS_DEV_DATA_DIR: /data
+      RUST_LOG: info
+
+volumes:
+  horizons_data:

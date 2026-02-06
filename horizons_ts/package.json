@@ -1,0 +1,18 @@
+{
+  "name": "@horizons/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "vitest": "1.5.0",
+    "msw": "2.3.1"
+  }
+}
