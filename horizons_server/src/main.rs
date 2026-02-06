@@ -1,5 +1,5 @@
 use clap::Parser;
-use horizons_rs::cli::{Cli, Commands};
+use horizons_server::cli::{Cli, Commands};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -23,8 +23,8 @@ async fn main() -> anyhow::Result<()> {
             data_dir,
         } => {
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
-            let state = horizons_rs::dev_backends::build_dev_state(data_dir).await?;
-            horizons_rs::server::serve(addr, state).await?;
+            let state = horizons_server::dev_backends::build_dev_state(data_dir).await?;
+            horizons_server::server::serve(addr, state).await?;
         }
         Commands::Migrate { database_url } => {
             // Central DB (Postgres) migrations.

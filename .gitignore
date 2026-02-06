@@ -2,6 +2,10 @@
 /target/
 **/*.rs.bk
 
+# Node
+**/node_modules/
+**/dist/
+
 # IDE
 .idea/
 .vscode/

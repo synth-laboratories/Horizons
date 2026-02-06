@@ -20,7 +20,7 @@ jobs:
         id: vars
         run: |
           set -euo pipefail
-          VERSION="$(grep -E '^version\\s*=\\s*\"' horizons_rs/Cargo.toml | head -n 1 | sed -E 's/^.*\"([^\"]+)\".*$/\\1/')"
+          VERSION="$(grep -E '^version\\s*=\\s*\"' horizons_server/Cargo.toml | head -n 1 | sed -E 's/^.*\"([^\"]+)\".*$/\\1/')"
           BASE="${VERSION%%-*}"
           DATE="$(date -u +%Y%m%d)"
           TAG="v${BASE}-dev.${DATE}.${GITHUB_RUN_NUMBER}"

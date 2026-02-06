@@ -1,14 +1,33 @@
 {
-  "name": "@horizons/sdk",
-  "version": "0.1.2-dev.0",
+  "name": "@horizons-ai/sdk",
+  "version": "0.1.2-dev.1",
   "type": "module",
-  "main": "dist/index.cjs",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE.md",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "SEE LICENSE IN LICENSE.md",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "build:esm": "tsc -p tsconfig.build.esm.json",
+    "build:cjs": "tsc -p tsconfig.build.cjs.json",
+    "postbuild": "node ./scripts/postbuild.mjs",
+    "build": "npm run build:esm && npm run build:cjs",
+    "prepublishOnly": "npm run build && npm test",
+    "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
     "typescript": "5.4.5",
