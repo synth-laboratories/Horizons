@@ -9,6 +9,7 @@ export { ContextRefreshAPI } from "./contextRefresh";
 export { OptimizationAPI } from "./optimization";
 export { EvaluationAPI } from "./evaluation";
 export { EngineAPI } from "./engine";
+export { PipelinesAPI } from "./pipelines";
 export type {
   AgentKind,
   PermissionMode,

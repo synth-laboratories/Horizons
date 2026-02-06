@@ -45,7 +45,7 @@ export interface ActionProposal {
   action_type: string;
   payload: unknown;
   risk_level: RiskLevel;
-  dedupe_key: string;
+  dedupe_key?: string | null;
   context: unknown;
   status: ActionStatus;
   created_at: string;
@@ -54,6 +54,23 @@ export interface ActionProposal {
   decision_reason?: string | null;
   expires_at: string;
   execution_result?: unknown;
+}
+
+export interface StepResult {
+  step_id: string;
+  status: string;
+  output?: unknown | null;
+  error?: string | null;
+  duration_ms: number;
+}
+
+export interface PipelineRun {
+  id: string;
+  pipeline_id: string;
+  status: unknown;
+  step_results: Record<string, StepResult>;
+  started_at: string;
+  completed_at?: string | null;
 }
 
 export interface OptimizationRunRow {

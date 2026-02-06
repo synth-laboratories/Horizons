@@ -60,6 +60,63 @@ use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::server::AppState;
+use horizons_graph::llm::LlmClient as GraphLlmClient;
+use horizons_graph::tools::DefaultToolExecutor as GraphToolExecutor;
+use horizons_graph::GraphEngine;
+
+struct BuiltinGraphRunner {
+    engine: Arc<GraphEngine>,
+}
+
+#[async_trait]
+impl horizons_core::pipelines::traits::GraphRunner for BuiltinGraphRunner {
+    #[tracing::instrument(level = "info", skip_all, fields(graph_id = %graph_id))]
+    async fn run_graph(
+        &self,
+        graph_id: &str,
+        mut inputs: serde_json::Value,
+        context: serde_json::Value,
+        _identity: &AgentIdentity,
+    ) -> CoreResult<serde_json::Value> {
+        // Inject pipeline context for graph nodes and tool calls.
+        match inputs.as_object_mut() {
+            Some(m) => {
+                m.entry("_pipeline".to_string())
+                    .or_insert_with(|| context.clone());
+            }
+            None => {
+                inputs = serde_json::json!({
+                    "input": inputs,
+                    "_pipeline": context,
+                });
+            }
+        }
+
+        let yaml = horizons_graph::registry::get_builtin_graph_yaml(graph_id).ok_or_else(|| {
+            CoreError::NotFound(format!("unknown built-in graph_id '{graph_id}'"))
+        })?;
+        let graph_value: serde_json::Value = serde_yaml::from_str(yaml).map_err(|e| {
+            CoreError::InvalidInput(format!("invalid built-in graph yaml ({graph_id}): {e}"))
+        })?;
+
+        let ir = horizons_graph::ir::GraphIr {
+            schema_version: horizons_graph::ir::GRAPH_IR_SCHEMA_VERSION.to_string(),
+            graph: Some(graph_value),
+            metadata: None,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            entrypoints: Vec::new(),
+        };
+
+        let run = self
+            .engine
+            .execute_graph_ir(&ir, inputs, None)
+            .await
+            .map_err(|e| CoreError::backend("pipeline graph run failed", e))?;
+
+        Ok(run.output)
+    }
+}
 
 #[derive(Clone)]
 struct StaticMcpScopeProvider {
@@ -1296,8 +1353,15 @@ impl DevEventBus {
 impl EventBus for DevEventBus {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn publish(&self, event: Event) -> EventsResult<String> {
+        let mut events = self.events.write().await;
+        if let Some(existing) = events
+            .iter()
+            .find(|e| e.org_id == event.org_id && e.dedupe_key == event.dedupe_key)
+        {
+            return Ok(existing.id.clone());
+        }
         let id = event.id.clone();
-        self.events.write().await.push(event);
+        events.push(event);
         Ok(id)
     }
 
@@ -1481,6 +1545,34 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         None
     };
 
+    // Graph engine (used by verifier graphs and context ingestion pipelines).
+    // Configuration is env-driven (LLM keys, tool executor endpoint, python backend, etc).
+    let graph_llm = Arc::new(GraphLlmClient::new()) as Arc<dyn horizons_graph::llm::LlmClientApi>;
+    let graph_tools =
+        Arc::new(GraphToolExecutor::from_env()) as Arc<dyn horizons_graph::tools::ToolExecutor>;
+    let graph_engine = Arc::new(GraphEngine::new(graph_llm, graph_tools));
+
+    let pipelines: Arc<dyn horizons_core::pipelines::traits::PipelineRunner> = {
+        let subagent = Arc::new(horizons_core::pipelines::engine::CoreAgentsSubagent::new(
+            core_agents.clone(),
+        )) as Arc<dyn horizons_core::pipelines::traits::Subagent>;
+
+        let mcp_client = mcp_gateway
+            .clone()
+            .map(|g| g as Arc<dyn horizons_core::core_agents::mcp::McpClient>);
+
+        let graph_runner = Some(Arc::new(BuiltinGraphRunner {
+            engine: graph_engine.clone(),
+        }) as Arc<dyn horizons_core::pipelines::traits::GraphRunner>);
+
+        Arc::new(horizons_core::pipelines::engine::DefaultPipelineRunner::new(
+            event_bus.clone(),
+            subagent,
+            mcp_client,
+            graph_runner,
+        )) as Arc<dyn horizons_core::pipelines::traits::PipelineRunner>
+    };
+
     #[cfg(feature = "memory")]
     let memory: Arc<dyn HorizonsMemory> = {
         let embedder = Arc::new(HashEmbedder::new(64)) as Arc<dyn voyager::EmbeddingModel>;
@@ -1506,8 +1598,8 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         let llm = Arc::new(DevMiproLlm) as Arc<dyn MiproLlmClient>;
         let sampler = Arc::new(mipro_v2::BasicSampler::new()) as Arc<dyn MiproVariantSampler>;
         let metric = Arc::new(ExactMatchMetric) as Arc<dyn mipro_v2::EvalMetric>;
-        let cl = Arc::new(build_mipro_continual_learning(llm, sampler, metric))
-            as Arc<dyn horizons_core::optimization::traits::ContinualLearning>;
+        let cl_impl = Arc::new(build_mipro_continual_learning(llm, sampler, metric));
+        let cl = cl_impl.clone() as Arc<dyn horizons_core::optimization::traits::ContinualLearning>;
         Arc::new(OptimizationEngine::new(
             central_db.clone(),
             project_db.clone(),
@@ -1536,6 +1628,35 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
             project_db.clone(),
             filestore.clone(),
             ev,
+        ))
+    };
+
+    #[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
+    let continual_learning: Arc<horizons_core::optimization::continual::ContinualLearningEngine> = {
+        // Rebuild the same underlying optimizer/evaluator wiring used above so the cycle endpoint
+        // can access the concrete MIPRO optimizer (for prompt rendering + LLM access).
+        let llm = Arc::new(DevMiproLlm) as Arc<dyn MiproLlmClient>;
+        let sampler = Arc::new(mipro_v2::BasicSampler::new()) as Arc<dyn MiproVariantSampler>;
+        let metric = Arc::new(ExactMatchMetric) as Arc<dyn mipro_v2::EvalMetric>;
+        let cl_impl = Arc::new(build_mipro_continual_learning(llm, sampler, metric));
+
+        let cfg = VerifierConfig { pass_threshold: 0.0 };
+        let signals = vec![RewardSignal {
+            name: "contains_ok".to_string(),
+            weight: SignalWeight(1.0),
+            kind: SignalKind::Contains {
+                needle: "ok".to_string(),
+            },
+            description: String::new(),
+        }];
+        let ev = Arc::new(build_rlm_evaluator(cfg, signals, None)?)
+            as Arc<dyn horizons_core::evaluation::traits::Evaluator>;
+
+        Arc::new(horizons_core::optimization::continual::ContinualLearningEngine::new(
+            memory.clone(),
+            cl_impl,
+            ev,
+            event_bus.clone(),
         ))
     };
 
@@ -1597,9 +1718,11 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         cache,
         graph_store,
         vector_store,
+        graph_engine,
         event_bus,
         context_refresh,
         core_agents,
+        pipelines,
         mcp_gateway,
         sandbox_runtime,
         #[cfg(feature = "memory")]
@@ -1608,5 +1731,7 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         optimization,
         #[cfg(feature = "evaluation")]
         evaluation,
+        #[cfg(all(feature = "memory", feature = "optimization", feature = "evaluation"))]
+        continual_learning,
     ))
 }

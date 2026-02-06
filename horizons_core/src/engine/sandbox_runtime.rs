@@ -8,11 +8,29 @@ use crate::engine::models::{PermissionMode, SandboxConfig, SandboxHandle, Sandbo
 use crate::engine::sandbox_agent_client::{CreateSessionRequest, SandboxAgentClient};
 use crate::engine::traits::SandboxBackend;
 use crate::{Error, Result};
+use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Interval between event polling iterations.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Snapshot of a long-running sandbox agent run started via `start_agent_tracked`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActiveSandboxRun {
+    /// Stable run identifier (not the container/sandbox ID).
+    pub run_id: String,
+    pub org_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    pub sandbox: SandboxHandle,
+    pub session_id: String,
+    pub restart_count: u32,
+    pub started_at: DateTime<Utc>,
+    pub config: SandboxConfig,
+    pub instruction: String,
+}
 
 /// The sandbox runtime orchestrates provisioning a container, driving a coding
 /// agent session via sandbox-agent, and collecting the results.
@@ -21,11 +39,15 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// the `run_agent()` method which encapsulates the entire execution flow.
 pub struct SandboxRuntime {
     backend: Arc<dyn SandboxBackend>,
+    active: DashMap<String, ActiveSandboxRun>,
 }
 
 impl SandboxRuntime {
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            active: DashMap::new(),
+        }
     }
 
     /// Run a coding agent session in a new sandbox, returning structured results.
@@ -252,7 +274,81 @@ impl SandboxRuntime {
         Ok((handle, session_id))
     }
 
+    /// Start an agent session and track it in-memory for monitoring/restart.
+    ///
+    /// Returns a stable `run_id` which can be used for subsequent health checks,
+    /// SSE polling, release, and crash recovery.
+    #[tracing::instrument(level = "info", skip(self, config, instruction), fields(agent = %config.agent))]
+    pub async fn start_agent_tracked(
+        &self,
+        org_id: String,
+        agent_id: Option<String>,
+        config: &SandboxConfig,
+        instruction: &str,
+    ) -> Result<ActiveSandboxRun> {
+        let (handle, session_id) = self.start_agent(config, instruction).await?;
+        let run_id = ulid::Ulid::new().to_string();
+        let run = ActiveSandboxRun {
+            run_id: run_id.clone(),
+            org_id,
+            agent_id,
+            sandbox: handle,
+            session_id,
+            restart_count: 0,
+            started_at: Utc::now(),
+            config: config.clone(),
+            instruction: instruction.to_string(),
+        };
+        self.active.insert(run_id, run.clone());
+        Ok(run)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub fn list_active(&self) -> Vec<ActiveSandboxRun> {
+        self.active.iter().map(|e| e.value().clone()).collect()
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub fn get_active(&self, run_id: &str) -> Option<ActiveSandboxRun> {
+        self.active.get(run_id).map(|e| e.value().clone())
+    }
+
+    /// Release a tracked run (best-effort) and remove it from the active set.
+    #[tracing::instrument(level = "info", skip_all)]
+    pub async fn release_run(&self, run_id: &str) -> Result<()> {
+        let run = self
+            .active
+            .remove(run_id)
+            .map(|(_, v)| v)
+            .ok_or_else(|| Error::NotFound(format!("sandbox run not found: {run_id}")))?;
+        self.backend.release(&run.sandbox).await
+    }
+
+    /// Restart a tracked run by provisioning a new sandbox and replaying the original instruction.
+    ///
+    /// This does not attempt checkpoint/resume; it is a best-effort "restart from scratch" policy
+    /// intended for dev ergonomics and crash cleanup.
+    #[tracing::instrument(level = "info", skip_all)]
+    pub async fn restart_run(&self, run_id: &str) -> Result<ActiveSandboxRun> {
+        let Some(mut run) = self.get_active(run_id) else {
+            return Err(Error::NotFound(format!("sandbox run not found: {run_id}")));
+        };
+
+        let (new_handle, new_session_id) = self.start_agent(&run.config, &run.instruction).await?;
+
+        // Release the old sandbox best-effort.
+        let _ = self.backend.release(&run.sandbox).await;
+
+        run.sandbox = new_handle;
+        run.session_id = new_session_id;
+        run.restart_count = run.restart_count.saturating_add(1);
+        run.started_at = Utc::now();
+        self.active.insert(run_id.to_string(), run.clone());
+        Ok(run)
+    }
+
     /// Release a sandbox by its handle.
+    #[tracing::instrument(level = "info", skip_all)]
     pub async fn release(&self, handle: &SandboxHandle) -> Result<()> {
         self.backend.release(handle).await
     }

@@ -1,0 +1,140 @@
+name: zero_shot_verifier_contrastive_rlm
+metadata:
+  type: VerifierGraph
+  description: |
+    Zero-shot verifier graph for contrastive evaluation using RLM strategy.
+    Evaluates verifier judgments by comparing to gold examples, using RLM tools for massive traces.
+    Handles massive traces (> 500K tokens) via tool-based search and analysis.
+
+start_nodes: [materialize_trace]
+
+nodes:
+  materialize_trace:
+    name: materialize_trace
+    type: DagNode
+    input_mapping: '{"trace": state.get("trace", {}), "gold_examples": state.get("gold_examples", []), "candidate_score": state.get("candidate_score"), "candidate_reasoning": state.get("candidate_reasoning", "")}'
+    implementation:
+      type: python_function
+      fn_str: |
+        import json
+        def materialize_trace(trace: dict, gold_examples: list, candidate_score: float, candidate_reasoning: str) -> dict:
+            """Materialize trace, gold examples, and verifier judgment for RLM processing."""
+            trace_json = json.dumps(trace, indent=2)
+            examples_json = json.dumps(gold_examples, indent=2)
+            judgment_json = json.dumps({"score": candidate_score, "reasoning": candidate_reasoning}, indent=2)
+            return {
+                "trace_content": trace_json,
+                "examples_content": examples_json,
+                "judgment_content": judgment_json,
+                "trace_size_chars": len(trace_json),
+                "estimated_tokens": len(trace_json) // 4
+            }
+
+  rlm_evaluate:
+    name: rlm_evaluate
+    type: DagNode
+    input_mapping: '{"query": "Evaluate this verifier''s judgment by comparing to gold examples. Use tools to efficiently search and analyze, then critique: Does it follow the same scoring patterns? Is reasoning consistent? Produce event_reviews, outcome_review, and event_totals.", "trace_content": state.get("trace_content", ""), "examples_content": state.get("examples_content", ""), "judgment_content": state.get("judgment_content", ""), "expected_rubric": state.get("expected_rubric", ""), "options": state.get("options", {})}'
+    implementation:
+      type: rlm_compute
+      rlm_impl: v1
+      model_name: MUST_OVERRIDE_MODEL
+      max_iterations: 25
+      max_root_calls: 50
+      max_subcalls: 100
+      is_verifier: true  # Requires structured event_reviews/outcome_review output
+      tools:
+        - materialize_context
+        - codex_exec
+        - local_grep
+        - local_search
+        - delegate_lm
+        - add_evidence
+      system_prompt: |
+        You are evaluating a VERIFIER's judgment by comparing to gold-standard examples using RLM tools.
+
+        Available tools:
+        - materialize_context: Write input fields to files in sandbox. Use field_name="trace_content" for trace, field_name="examples_content" for gold examples, field_name="judgment_content" for verifier judgment.
+        - codex_exec: Run shell commands (grep, awk, python, etc.) to search/analyze
+        - local_grep: Regex search on materialized content
+        - local_search: Substring search
+        - delegate_lm: Call a sub-LLM for semantic analysis with structured output
+        - add_evidence: Record evidence supporting your evaluation (persists across summaries)
+
+        Strategy:
+        1. Use materialize_context with field_name="trace_content", field_name="examples_content", and field_name="judgment_content" to write files
+        2. Use codex_exec/local_grep to search for relevant sections
+        3. Use add_evidence to record specific findings that support your scores
+        4. Use delegate_lm for semantic analysis on small chunks
+        5. Compare verifier's judgment to gold examples
+        6. Evaluate consistency and correctness
+        7. Aggregate into final outcome review
+
+        Return JSON with event_reviews and outcome_review matching the verifier API format.
+      user_prompt: |
+        Evaluate this verifier's judgment by comparing to gold examples:
+        
+        ## Gold Examples
+        <input>examples_content</input>
+        
+        ## Verifier's Judgment
+        <input>judgment_content</input>
+        
+        ## Trace Content
+        <input>trace_content</input>
+        
+        ## Expected Rubric (if provided)
+        <input>expected_rubric</input>
+        
+        Use tools to efficiently search and analyze, then critique the verifier's judgment:
+        - Does it follow the same scoring patterns as the gold examples?
+        - Is the reasoning consistent with how gold examples were explained?
+        - Would this verifier produce similar scores to the gold on similar traces?
+        
+        Produce:
+        - event_reviews: List of reviews evaluating the verifier's judgment per event
+        - outcome_review: Overall evaluation of the verifier's judgment
+        - event_totals: List of scores for each event evaluation
+
+  parse_rlm_output:
+    name: parse_rlm_output
+    type: DagNode
+    input_mapping: '{"rlm_output": state.get("rlm_evaluate_output", ""), "event_count": state.get("estimated_tokens", 0) // 1000}'
+    implementation:
+      type: python_function
+      fn_str: |
+        import json
+        import re
+        
+        def parse_rlm_output(rlm_output: str, event_count: int) -> dict:
+            """Parse RLM output into structured event_reviews and outcome_review."""
+            # Try to extract JSON from RLM output
+            json_match = re.search(r'\{.*"event_reviews".*"outcome_review".*\}', rlm_output, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group())
+                    return {
+                        "event_reviews": parsed.get("event_reviews", []),
+                        "outcome_review": parsed.get("outcome_review", {}),
+                        "event_totals": parsed.get("event_totals", [])
+                    }
+                except:
+                    pass
+            
+            # Fallback: create basic structure
+            return {
+                "event_reviews": [{"criteria": {}, "total": 0.5, "summary": "RLM evaluation"}],
+                "outcome_review": {"criteria": {}, "total": 0.5, "summary": "RLM evaluation"},
+                "event_totals": [0.5] * max(1, event_count)
+            }
+
+control_edges:
+  materialize_trace:
+    - target: rlm_evaluate
+  rlm_evaluate:
+    - target: parse_rlm_output
+  parse_rlm_output: []
+
+verdict_weights:
+  parse_rlm_output: 1.0
+
+aggregation_policy: weighted_average

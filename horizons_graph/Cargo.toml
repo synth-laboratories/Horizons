@@ -1,0 +1,43 @@
+[package]
+name = "horizons_graph"
+version = "0.1.0"
+edition = "2024"
+license-file = "LICENSE.md"
+
+[features]
+default = ["rlm_v1"]
+
+# Embed the graph-rlm-v1 implementation as a module.
+rlm_v1 = []
+
+# Optional: run Python via the pydantic/monty interpreter (if/when wired up).
+# This is intentionally off-by-default until the Monty Rust API stabilizes for our use.
+monty = ["dep:monty"]
+
+[dependencies]
+async-stream = "0.3"
+async-trait = "0.1.89"
+async-recursion = "1.1"
+bytes = "1.10.1"
+chrono = { version = "0.4.40", features = ["serde"] }
+futures-core = "0.3.31"
+futures-util = "0.3.31"
+hex = "0.4"
+jsonschema = "0.17"
+regex = "1"
+reqwest = { version = "0.11.27", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1.0.218", features = ["derive"] }
+serde_json = "1.0.139"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2.0.11"
+tiktoken-rs = "0.5"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
+tracing = "0.1.41"
+uuid = { version = "1.15.1", features = ["v4"] }
+
+# Optional: Monty (python interpreter in Rust)
+monty = { git = "https://github.com/pydantic/monty", optional = true }
+
+[lints]
+workspace = true

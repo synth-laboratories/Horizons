@@ -1,0 +1,122 @@
+name: zero_shot_verifier_fewshot_single
+metadata:
+  type: VerifierGraph
+  description: |
+    Zero-shot verifier graph for few-shot evaluation using single LLM call.
+    Uses calibration examples (labeled traces) to learn evaluation patterns.
+    Evaluates entire trace + calibration examples in one call. Best for short traces (< 50K tokens).
+    Accepts dynamic calibration examples as input parameters (no training required).
+
+start_nodes: [evaluate]
+
+nodes:
+  evaluate:
+    name: evaluate
+    type: DagNode
+    input_mapping: '{"trace": state.get("trace", {}), "calibration_examples": state.get("calibration_examples", []), "expected_score": state.get("expected_score"), "expected_rubric": state.get("expected_rubric", ""), "system_prompt": state.get("system_prompt", ""), "user_prompt": state.get("user_prompt", ""), "options": state.get("options", {})}'
+    implementation:
+      type: template_transform
+      model_name: MUST_OVERRIDE_MODEL
+      temperature: 1.0
+      max_tokens: 4096
+      sequence:
+        template_likes:
+          - type: prompt_template
+            message_type: SYSTEM
+            input_fields:
+              system_prompt:
+                field_name: system_prompt
+                description: Custom system prompt (optional)
+                is_required: false
+            structured_template: |
+              <input>system_prompt</input>
+              
+              You are calibrating a verifier against known examples. Learn evaluation patterns from the calibration examples (traces with their rewards) and apply them consistently.
+              Evaluate the new trace using the patterns learned from the calibration examples.
+              Return structured JSON with event_reviews (list) and outcome_review (object).
+          - type: prompt_template
+            message_type: USER
+            input_fields:
+              calibration_examples:
+                field_name: calibration_examples
+                description: List of labeled examples - full traces with their ground truth rewards (event_rewards and outcome_reward)
+                is_required: true
+              trace:
+                field_name: trace
+                description: The execution trace to evaluate (V3 format)
+                is_required: true
+              expected_score:
+                field_name: expected_score
+                description: Optional expected score for this trace
+                is_required: false
+              expected_rubric:
+                field_name: expected_rubric
+                description: Optional expected rubric/ground truth for this trace
+                is_required: false
+              user_prompt:
+                field_name: user_prompt
+                description: Custom user prompt (optional)
+                is_required: false
+            structured_template: |
+              <input>user_prompt</input>
+              
+              Learn evaluation patterns from these calibration examples (labeled traces with their rewards):
+              
+              ## Calibration Examples
+              <input>calibration_examples</input>
+              
+              Each example contains:
+              - trace: Full execution trace (V3 format)
+              - event_rewards: List of rewards per event (ground truth)
+              - outcome_reward: Overall outcome reward (ground truth)
+              
+              Study these examples to understand:
+              - What patterns in traces lead to high/low rewards?
+              - How should events be evaluated?
+              - What makes a good overall outcome?
+              
+              Now evaluate this new trace using the patterns you learned:
+              
+              ## Execution Trace to Evaluate
+              <input>trace</input>
+              
+              <input>expected_score</input>
+              <input>expected_rubric</input>
+              
+              ## Output Format
+              Return JSON with:
+              - event_reviews: List of reviews, one per event in the trace. Each review should have:
+                - criteria: Dict mapping criterion ID to {score: 0.0-1.0, reason: str, weight: float}
+                - total: Overall score for this event (0.0-1.0)
+                - summary: Brief description of what happened in this event
+              - outcome_review: Single review for the overall outcome with same structure as event_reviews
+              - event_totals: List of total scores for each event (for convenience)
+              
+              Apply the same evaluation patterns you learned from the calibration examples. Ensure scores are between 0.0 and 1.0.
+
+control_edges:
+  evaluate: []
+
+verdict_weights:
+  evaluate: 1.0
+
+aggregation_policy: weighted_average
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

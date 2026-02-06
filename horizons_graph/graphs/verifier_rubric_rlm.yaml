@@ -1,0 +1,314 @@
+name: zero_shot_verifier_rubric_rlm
+metadata:
+  type: VerifierGraph
+  description: |
+    Zero-shot verifier graph for rubric-based evaluation using RLM (Recursive Language Model) strategy.
+    Handles massive traces (> 500K tokens) via tool-based search and analysis.
+    Materializes trace to sandbox, uses tools to search/analyze chunks, then aggregates.
+    Accepts dynamic rubric criteria as input parameters (no training required).
+
+start_nodes: [estimate_trace_size]
+
+nodes:
+  estimate_trace_size:
+    name: estimate_trace_size
+    type: DagNode
+    input_mapping: '{"trace": state.get("trace", {}), "rubric": state.get("rubric", {})}'
+    implementation:
+      type: python_function
+      fn_str: |
+        import json
+        def estimate_trace_size(trace: dict, rubric: dict) -> dict:
+            trace_json = json.dumps(trace, indent=2)
+            return {
+                "trace_size_chars": len(trace_json),
+                "estimated_tokens": len(trace_json) // 4
+            }
+
+  rlm_evaluate:
+    name: rlm_evaluate
+    type: DagNode
+    # VERIFIER OPT SIMPLE: GEPA handles prompt injection at inference proxy level
+    input_mapping: '{"trace_content": state.get("trace", {}), "rubric_content": state.get("rubric", {}), "options": state.get("options", {}), "query": state.get("query", "")}'
+    implementation:
+      type: rlm_compute
+      rlm_impl: v1
+      model_name: MUST_OVERRIDE_MODEL
+      max_iterations: 2000
+      max_root_calls: 2000
+      max_subcalls: 10000
+      max_time_ms: 900000
+      max_cost_usd: 2.0
+      answer_schema: "outcome_review"  # Requires outcome_review with total field
+      tools:
+        - materialize_context
+        - codex_exec
+        - local_grep
+        - local_search
+        - view_lines
+        - delegate_lm
+        - add_evidence
+        - give_up
+      # VERIFIER OPT SIMPLE: GEPA optimizes this system prompt by intercepting LLM calls
+      # at the inference proxy level and replacing matching patterns with candidates.
+      # The baseline prompt below can be optimized without modifying this YAML.
+      system_prompt: |
+        You are an expert code reviewer evaluating execution traces.
+        Focus on:
+        1. Whether the agent used tools effectively
+        2. Whether code changes are correct and follow conventions
+        3. Whether the task was completed successfully
+        Be calibrated: reward 0.0 for failures, 0.5 for partial success, 1.0 for full success.
+
+        You are evaluating an execution trace against rubric criteria.
+        Query: <input>query</input>
+        Your output MUST include a final reward in outcome_review.total (0.0 to 1.0).
+
+        CRITICAL: You do NOT have direct access to the trace content! It is NOT in this message.
+        You MUST use tools to access the trace.
+
+        AVAILABLE TOOLS:
+        - materialize_context(field_name, filename): Store an input field to a file for searching
+        - local_grep(pattern, file): Regex search on stored content (fast)
+        - local_search(query, file): Substring search (fast)
+        - view_lines(file, start_line, max_lines): View a window of lines (max 100 lines per call)
+        - codex_exec(command): Execute shell commands (grep, python scripts, etc.)
+        - delegate_lm(role, prompt, output_schema): Call a sub-LLM for semantic analysis with structured output
+        - add_evidence(description, evidence_snippet): Record evidence supporting rubric criteria (persists across summaries)
+        - submit_answer(answer): Submit your final structured answer - MUST BE CALLED!
+        - give_up(reason): End early with a structured verifier error (use only if you cannot finish)
+
+        MANDATORY WORKFLOW:
+        1. Call materialize_context(field_name="trace_content", filename="trace.json")
+        2. Call materialize_context(field_name="rubric_content", filename="rubric.json")
+        3. Use local_grep/local_search to find relevant evidence in the trace
+        4. Use add_evidence to record specific findings that support each rubric criterion
+        5. Evaluate findings against rubric criteria
+        6. Call submit_answer with the structured result
+
+        CRITICAL: You MUST call submit_answer before iteration limit!
+        - If you have enough information, call submit_answer with your evaluation
+        - If you cannot complete evaluation, call submit_answer with your best attempt and note limitations
+        - NEVER let iterations expire without calling submit_answer
+        - If you truly cannot finish, call give_up(reason) instead of letting the limit expire
+
+        REQUIRED submit_answer STRUCTURE (EXACT FORMAT - ALL FIELDS MANDATORY):
+        submit_answer(answer={
+            "outcome_review": {
+                "criteria": {
+                    "<criterion_id>": {"reward": 0.9, "reason": "explanation", "weight": 1.0}
+                },
+                "total": 0.9,
+                "summary": "Overall summary",
+                "reasoning": "Short explanation of why the outcome was rewarded as it did"
+            },
+        })
+
+        EXAMPLE - If rubric has criteria "accuracy" and "clarity":
+        submit_answer(answer={
+            "outcome_review": {
+                "criteria": {
+                    "overall": {"reward": 0.9, "reason": "Response meets expectations", "weight": 1.0}
+                },
+                "total": 0.9,
+                "summary": "The interaction was successful",
+                "reasoning": "Concise reasoning for the outcome reward"
+            },
+        })
+
+        CRITICAL - WILL FAIL WITHOUT THESE:
+        - "total" field is REQUIRED in outcome_review (final reward 0.0-1.0)
+        - "total" must be a NUMBER (float), not a string
+        - You MUST call submit_answer tool - plain text responses are rejected
+        - Each criterion from rubric MUST appear in criteria dict
+    user_prompt: |
+        Evaluate this execution trace against the rubric criteria.
+        Provide a final reward in outcome_review.total based on rubric weights.
+
+        ## Rubric (what to evaluate):
+        <input>rubric_content</input>
+
+        ## Instructions:
+        The trace content is available via the input field "trace_content".
+        The trace is large, so do NOT try to process it all at once!
+
+        Steps:
+        1. Call materialize_context(field_name="trace_content", filename="trace.json") to store the trace
+        2. Call materialize_context(field_name="rubric_content", filename="rubric.json") to store the rubric
+        3. Use local_grep/local_search to find relevant evidence in the trace
+        4. Evaluate the trace against the rubric criteria
+        5. Call submit_answer with the structured result
+
+        IMPORTANT: You MUST call submit_answer with the exact structure from the system prompt and provide a final reward in outcome_review.total.
+
+  extract_rlm_result:
+    name: extract_rlm_result
+    type: DagNode
+    input_mapping: '{"answer": state.get("answer", None), "rlm_stats": state.get("_rlm_stats", {}), "trace": state.get("_trace", {}), "error": state.get("error", None), "executor_stats": state.get("_executor_stats", {}), "estimated_tokens": state.get("estimated_tokens", 0)}'
+    implementation:
+      type: python_function
+      fn_str: |
+        import json
+
+        # Minimum token threshold below which tools are optional
+        TOOL_REQUIRED_TOKEN_THRESHOLD = 10000
+
+        def extract_rlm_result(answer, rlm_stats: dict, trace: dict, error, executor_stats: dict, estimated_tokens: int) -> dict:
+            """Extract RLM result with structured verifier errors.
+
+            CRITICAL: RLM MUST use tools for large contexts. This is the whole point of RLM.
+            If the context is > 10K tokens and no tools were called, the session FAILED.
+            """
+            def _build_error(
+                subtype: str,
+                message: str,
+                *,
+                tool_call_count: int,
+                work_tool_calls: list,
+                partial: bool = True,
+                code: str | None = None,
+            ) -> dict:
+                error_payload = {
+                    "type": "VerifierError",
+                    "subtype": subtype,
+                    "code": code or f"VerifierError.{subtype}",
+                    "message": message,
+                }
+                return {
+                    "partial": partial,
+                    "error": error_payload,
+                    "reason": message,
+                    "rlm_stats": rlm_stats,
+                    "execution_trace": trace,
+                    "executor_stats": executor_stats,
+                    "tool_usage": {
+                        "estimated_tokens": estimated_tokens,
+                        "total_tool_calls": tool_call_count,
+                        "work_tool_calls": len(work_tool_calls),
+                        "tools_used": list(set(tc.get("tool") for tc in work_tool_calls)),
+                    },
+                }
+            # Check for errors first
+            if error:
+                error_text = str(error)
+                tool_calls = trace.get("tool_calls", []) if isinstance(trace, dict) else []
+                work_tool_calls = [tc for tc in tool_calls if tc.get("tool") != "submit_answer"]
+                if isinstance(error, dict) and error.get("type") == "VerifierError":
+                    return _build_error(
+                        error.get("subtype", "Unknown"),
+                        error.get("message", error_text),
+                        tool_call_count=len(tool_calls),
+                        work_tool_calls=work_tool_calls,
+                        code=error.get("code"),
+                    )
+                if "max iterations or budget reached" in error_text.lower():
+                    return _build_error(
+                        "LimitReached",
+                        "RLM stopped after reaching iteration or budget limit.",
+                        tool_call_count=len(tool_calls),
+                        work_tool_calls=work_tool_calls,
+                    )
+                return _build_error(
+                    "ExecutionError",
+                    f"RLM execution failed with error: {error_text}",
+                    tool_call_count=len(tool_calls),
+                    work_tool_calls=work_tool_calls,
+                )
+
+            # =========================================================================
+            # TOOL USAGE ENFORCEMENT - RLM MUST USE TOOLS FOR LARGE CONTEXTS
+            # =========================================================================
+            tool_calls = trace.get("tool_calls", []) if isinstance(trace, dict) else []
+            tool_call_count = len(tool_calls)
+
+            # Filter out submit_answer - only count actual work tools
+            work_tool_calls = [tc for tc in tool_calls if tc.get("tool") != "submit_answer"]
+            work_tool_count = len(work_tool_calls)
+
+            if estimated_tokens > TOOL_REQUIRED_TOKEN_THRESHOLD and work_tool_count == 0:
+                message = (
+                    f"RLM FAILED: Context has {estimated_tokens} tokens (>{TOOL_REQUIRED_TOKEN_THRESHOLD}) "
+                    f"but NO TOOLS were used! RLM MUST use tools (materialize_context, local_grep, etc.) "
+                    f"for large contexts. The LLM read the context directly instead of using tools. "
+                    f"This defeats the purpose of RLM. "
+                    f"Total tool calls: {tool_call_count}, Work tool calls: {work_tool_count}. "
+                    f"RLM stats: {json.dumps(rlm_stats, default=str)}"
+                )
+                return _build_error(
+                    "ToolsNotUsed",
+                    message,
+                    tool_call_count=tool_call_count,
+                    work_tool_calls=work_tool_calls,
+                )
+
+            if answer is None:
+                return _build_error(
+                    "NoSubmitAnswer",
+                    "RLM did not call submit_answer.",
+                    tool_call_count=tool_call_count,
+                    work_tool_calls=work_tool_calls,
+                )
+
+            if not isinstance(answer, dict):
+                return _build_error(
+                    "InvalidAnswer",
+                    f"RLM answer is not a dict (got {type(answer).__name__}). Answer: {str(answer)[:500]}",
+                    tool_call_count=tool_call_count,
+                    work_tool_calls=work_tool_calls,
+                )
+
+            # Validate required fields
+            if "outcome_review" not in answer:
+                return _build_error(
+                    "MissingOutcomeReview",
+                    (
+                        f"RLM answer missing 'outcome_review' field. Got keys: {list(answer.keys())}. "
+                        f"Answer: {json.dumps(answer, default=str)[:1000]}"
+                    ),
+                    tool_call_count=tool_call_count,
+                    work_tool_calls=work_tool_calls,
+                )
+
+            # Validate outcome_review structure
+            outcome_review = answer["outcome_review"]
+            if not isinstance(outcome_review, dict):
+                return _build_error(
+                    "InvalidOutcomeReview",
+                    f"outcome_review must be a dict, got {type(outcome_review).__name__}",
+                    tool_call_count=tool_call_count,
+                    work_tool_calls=work_tool_calls,
+                )
+            if "total" not in outcome_review:
+                return _build_error(
+                    "NotTerminated",
+                    "RLM outcome_review missing total.",
+                    tool_call_count=tool_call_count,
+                    work_tool_calls=work_tool_calls,
+                )
+
+            # Return structured result WITH audit trail
+            return {
+                "outcome_review": outcome_review,
+                # Audit trail - all tool call records (no underscore prefix so they're included in output)
+                "rlm_stats": rlm_stats,
+                "execution_trace": trace,
+                "executor_stats": executor_stats,
+                "tool_usage": {
+                    "estimated_tokens": estimated_tokens,
+                    "total_tool_calls": tool_call_count,
+                    "work_tool_calls": work_tool_count,
+                    "tools_used": list(set(tc.get("tool") for tc in work_tool_calls)),
+                },
+            }
+
+control_edges:
+  estimate_trace_size:
+    - target: rlm_evaluate
+  rlm_evaluate:
+    - target: extract_rlm_result
+  extract_rlm_result: []
+
+verdict_weights:
+  extract_rlm_result: 1.0
+
+aggregation_policy: weighted_average

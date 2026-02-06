@@ -1,0 +1,123 @@
+name: zero_shot_verifier_rubric_single
+metadata:
+  type: VerifierGraph
+  description: |
+    Zero-shot verifier graph for rubric-based evaluation using single LLM call.
+    Evaluates entire trace + rubric in one call. Best for short traces (< 50K tokens).
+    Accepts dynamic rubric criteria as input parameters (no training required).
+
+start_nodes: [summarize_artifacts]
+
+nodes:
+  summarize_artifacts:
+    name: summarize_artifacts
+    type: DagNode
+    input_mapping: '{"artifact": state.get("artifact", [])}'
+    implementation:
+      type: python_function
+      fn_str: |
+        def summarize_artifacts(artifact):
+            def _textify(item):
+                if isinstance(item, str):
+                    return item
+                if isinstance(item, dict):
+                    try:
+                        import json
+                        return json.dumps(item, ensure_ascii=True, default=str)
+                    except Exception:
+                        return str(item)
+                return str(item)
+            if isinstance(artifact, dict):
+                artifact = [artifact]
+            if not isinstance(artifact, list):
+                return {"artifact_summary": ""}
+            summaries = []
+            for idx, entry in enumerate(artifact):
+                if not isinstance(entry, dict):
+                    summaries.append(f"- artifact[{idx}]: {str(entry)[:1000]}")
+                    continue
+                content = _textify(entry.get("content", ""))
+                content = content[:2000]
+                content_type = entry.get("content_type", "unknown")
+                metadata = entry.get("metadata", {})
+                summaries.append(
+                    f"- artifact[{idx}] type={content_type} metadata={metadata} content={content}"
+                )
+            return {"artifact_summary": "\n".join(summaries)}
+  evaluate:
+    name: evaluate
+    type: DagNode
+    input_mapping: '{"trace": state.get("trace", {}), "rubric": state.get("rubric", {}), "artifact_summary": state.get("artifact_summary", ""), "system_prompt": state.get("system_prompt", ""), "user_prompt": state.get("user_prompt", ""), "options": state.get("options", {}), "images": state.get("images", [])}'
+    implementation:
+      type: template_transform
+      model_name: MUST_OVERRIDE_MODEL
+      temperature: 1.0
+      max_tokens: 4096
+      sequence:
+        template_likes:
+          - type: prompt_template
+            message_type: SYSTEM
+            input_fields:
+              system_prompt:
+                field_name: system_prompt
+                description: Custom system prompt (optional)
+                is_required: false
+            structured_template: |
+              <input>system_prompt</input>
+              
+              You are a meticulous evaluator judging execution traces against explicit rubric criteria.
+              Evaluate each step and the overall outcome according to the provided rubric.
+              Return ONLY rewards for Synth-AI consumption (no extra fields).
+          - type: prompt_template
+            message_type: USER
+            input_fields:
+              rubric:
+                field_name: rubric
+                description: Rubric criteria for evaluation (event and outcome criteria)
+                is_required: true
+              trace:
+                field_name: trace
+                description: The execution trace to evaluate (V3 format)
+                is_required: true
+              user_prompt:
+                field_name: user_prompt
+                description: Custom user prompt (optional)
+                is_required: false
+              images:
+                field_name: images
+                description: Images referenced in the trace (for multimodal evaluation, optional)
+                is_required: false
+              artifact_summary:
+                field_name: artifact_summary
+                description: Optional artifact summary (textified)
+                is_required: false
+            structured_template: |
+              <input>user_prompt</input>
+
+              Evaluate this execution trace against the following rubric criteria:
+
+              ## Rubric
+              <input>rubric</input>
+
+              ## Execution Trace
+              <input>trace</input>
+
+              ## Artifacts (optional)
+              <input>artifact_summary</input>
+
+              ## Output Format
+              Return JSON with ONLY:
+              - outcome_reward: float (0.0-1.0) overall reward for the trace
+              - event_rewards: list of {event_id: int, reward_value: float} (optional; include if rubric has event criteria)
+
+              Use the rubric weights to compute rewards. Ensure all reward values are between 0.0 and 1.0.
+
+control_edges:
+  summarize_artifacts:
+    - target: evaluate
+  evaluate: []
+
+verdict_weights:
+  evaluate: 1.0
+
+aggregation_policy: weighted_average

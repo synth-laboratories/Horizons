@@ -82,11 +82,17 @@ impl EventBus for RedisEventBus {
             return Err(Error::PayloadTooLarge);
         }
 
-        self.store.append(&event).await?;
+        let (event_id, inserted) = self.store.append_deduped(&event).await?;
+
+        // If this is a deduplicated publish, return the existing ID and avoid
+        // double-waking the router / emitting duplicate pubsub messages.
+        if !inserted {
+            return Ok(event_id);
+        }
 
         // Best-effort pub/sub wakeup. Router also sweeps periodically.
         let channel = format!("horizons_events:{}", &event.org_id);
-        let msg = event.id.clone();
+        let msg = event_id.clone();
         {
             let mut conn = self.publisher.lock().await;
             redis::cmd("PUBLISH")
@@ -98,7 +104,7 @@ impl EventBus for RedisEventBus {
 
         self.router.router().wake_org(&event.org_id).await;
 
-        Ok(event.id)
+        Ok(event_id)
     }
 
     #[tracing::instrument(level = "debug", skip_all)]

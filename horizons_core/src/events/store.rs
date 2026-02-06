@@ -54,6 +54,17 @@ impl PgEventStore {
         .execute(&self.pool)
         .await?;
 
+        // Idempotency: prevent storing duplicate events for the same org+dedupe_key.
+        // Callers should pick a dedupe_key that's unique enough for their domain.
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS events_org_dedupe_key_idx
+              ON events (org_id, dedupe_key);
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         sqlx::query(
             r#"
             CREATE INDEX IF NOT EXISTS events_org_status_received_idx
@@ -89,12 +100,16 @@ impl PgEventStore {
         Ok(())
     }
 
+    /// Append an event with dedupe semantics.
+    ///
+    /// Returns `(event_id, inserted)` where `inserted=false` means an existing event
+    /// with the same `(org_id, dedupe_key)` already exists and was returned instead.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn append(&self, event: &Event) -> Result<()> {
+    pub async fn append_deduped(&self, event: &Event) -> Result<(String, bool)> {
         let payload = sqlx::types::Json(&event.payload);
         let metadata = sqlx::types::Json(&event.metadata);
 
-        sqlx::query(
+        let res = sqlx::query(
             r#"
             INSERT INTO events
                 (id, org_id, project_id, timestamp, received_at, direction, topic, source,
@@ -102,6 +117,7 @@ impl PgEventStore {
             VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8,
                  $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (org_id, dedupe_key) DO NOTHING
             "#,
         )
         .bind(&event.id)
@@ -115,13 +131,48 @@ impl PgEventStore {
         .bind(payload)
         .bind(&event.dedupe_key)
         .bind(status_to_str(&event.status))
-        .bind(event.retry_count as i64)
+        .bind(event.retry_count as i32)
         .bind(metadata)
         .bind(event.last_attempt_at)
         .execute(&self.pool)
         .await?;
 
+        if res.rows_affected() > 0 {
+            return Ok((event.id.clone(), true));
+        }
+
+        // Conflict: fetch the existing row and return its ID.
+        let existing = self
+            .get_by_dedupe_key(&event.org_id, &event.dedupe_key)
+            .await?
+            .ok_or_else(|| Error::message("event dedupe conflict but row not found".to_string()))?;
+        Ok((existing.id, false))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn append(&self, event: &Event) -> Result<()> {
+        let _ = self.append_deduped(event).await?;
         Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn get_by_dedupe_key(&self, org_id: &str, dedupe_key: &str) -> Result<Option<Event>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, org_id, project_id, timestamp, received_at, direction, topic, source,
+                   payload, dedupe_key, status, retry_count, metadata, last_attempt_at
+              FROM events
+             WHERE org_id = $1 AND dedupe_key = $2
+             ORDER BY received_at DESC
+             LIMIT 1
+            "#,
+        )
+        .bind(org_id)
+        .bind(dedupe_key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(event_from_row).transpose()
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -231,7 +282,7 @@ impl PgEventStore {
         .fetch_one(&self.pool)
         .await?;
 
-        let retry_count: i64 = row.try_get("retry_count")?;
+        let retry_count: i32 = row.try_get("retry_count")?;
         Ok(retry_count.max(0) as u32)
     }
 
@@ -380,7 +431,7 @@ pub(crate) fn event_from_row_ref(row: &sqlx::postgres::PgRow) -> Result<Event> {
     let dedupe_key: String = row.try_get("dedupe_key")?;
     let status_s: String = row.try_get("status")?;
     let status = status_from_str(&status_s)?;
-    let retry_count: i64 = row.try_get("retry_count")?;
+    let retry_count: i32 = row.try_get("retry_count")?;
     let metadata: sqlx::types::Json<serde_json::Value> = row.try_get("metadata")?;
     let last_attempt_at: Option<DateTime<Utc>> = row.try_get("last_attempt_at")?;
 

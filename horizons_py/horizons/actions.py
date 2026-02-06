@@ -18,7 +18,7 @@ class ActionsAPI:
         action_type: str,
         payload: Any,
         risk_level: models.RiskLevel,
-        dedupe_key: str,
+        dedupe_key: Optional[str] = None,
         context: Any,
         ttl_seconds: Optional[int] = None,
         project_id: Optional[UUID] = None,
@@ -28,9 +28,10 @@ class ActionsAPI:
             "action_type": action_type,
             "payload": payload,
             "risk_level": risk_level.value,
-            "dedupe_key": dedupe_key,
             "context": context,
         }
+        if dedupe_key is not None:
+            body["dedupe_key"] = dedupe_key
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
         if project_id:

@@ -20,7 +20,8 @@ pub struct ProposeActionRequest {
     pub action_type: String,
     pub payload: serde_json::Value,
     pub risk_level: RiskLevel,
-    pub dedupe_key: String,
+    #[serde(default)]
+    pub dedupe_key: Option<String>,
     pub context: serde_json::Value,
     pub ttl_seconds: Option<u64>,
 }

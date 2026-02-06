@@ -4,7 +4,14 @@ members = [
   "horizons_core",
   "horizons_rs",
   "horizons_integrations",
+  "horizons_graph",
   "voyager",
   "mipro_v2",
   "rlm",
 ]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
