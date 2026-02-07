@@ -1,8 +1,12 @@
 [package]
-name = "rlm"
+name = "rlm-rs"
 version = "0.1.0"
 edition = "2024"
+description = "Recursive Language Models — sandboxed LLM inference with unbounded compute"
 license-file = "LICENSE.md"
+repository = "https://github.com/synth-laboratories/rlm"
+keywords = ["llm", "recursive", "language-model", "inference", "sandbox"]
+categories = ["science", "algorithms"]
 
 [dependencies]
 async-trait = "0.1"

@@ -41,7 +41,7 @@ cron = "0.15"
 sandbox-agent-universal-agent-schema = { git = "https://github.com/rivet-dev/sandbox-agent", rev = "8a31519" }
 voyager = { path = "../voyager", optional = true }
 mipro_v2 = { path = "../mipro_v2", optional = true }
-rlm = { path = "../rlm", optional = true }
+rlm = { package = "rlm-rs", path = "../rlm", optional = true }
 
 [features]
 default = []

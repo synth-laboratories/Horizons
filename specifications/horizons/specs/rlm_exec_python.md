@@ -99,16 +99,20 @@ Instead, persistence is implemented as:
 2. After the user code runs, explicitly persist only those tracked names:
    - If a name is defined and its value is a “persistable” primitive/container
      (`int`, `float`, `bool`, `str`, `list`, `dict`, `tuple`, `set`, `None`),
-     store `repr(value)` into a returned dict.
-3. On the next execution, re-inject persisted names by emitting Python source:
-   `name = <repr from previous run>` (wrapped in `try/except`).
+     store the value into a returned dict (not `repr`).
+3. On the next execution, re-inject persisted names as Monty inputs (not as
+   emitted Python source).
 
 Limitations:
 - Variables not detected by the heuristic may not persist.
 - Non-primitive objects (modules, regex objects, iterators, etc.) will not be
   persisted by default.
-- Values are persisted by `repr()` and re-injected as source; some values may
-  not round-trip cleanly.
+- Only the “persistable” set above is persisted; other values are dropped.
+
+Rationale:
+- Context strings and persisted values are passed as Monty inputs to avoid
+  generating extremely large Python string literals (which can trigger internal
+  Monty panics while formatting tracebacks).
 
 
 ## Tool Result Shape
@@ -148,4 +152,3 @@ Build configuration:
 - `horizons_graph` enables `monty` by default.
 - It must still compile without `monty` by building with `--no-default-features`
   and explicitly enabling only needed features (e.g. `--features rlm_v1`).
-

@@ -17,12 +17,18 @@ pub struct PythonExecResult {
 ///
 /// Notes:
 /// - We don't keep a live interpreter instance; instead we persist a best-effort set of
-///   user variables by re-injecting them as Python source on each run.
-/// - We always inject a `files` dict and `context`/`context_N` aliases derived from
-///   materialized inputs.
+///   user variables by capturing a dict of values at the end of each run and re-injecting
+///   them as Monty inputs on the next run.
+/// - We always inject `files`/`context`/`context_N` aliases derived from materialized inputs.
 #[derive(Clone, Debug, Default)]
 pub struct MontyREPL {
-    /// Persisted Python namespace: variable_name -> python literal (repr-like) string.
+    /// Persisted Python namespace for `exec_python` calls within a single RLM run.
+    ///
+    /// This is only used when Monty is enabled; for non-monty builds the field is unused.
+    #[cfg(feature = "monty")]
+    namespace: HashMap<String, monty::MontyObject>,
+
+    #[cfg(not(feature = "monty"))]
     namespace: HashMap<String, String>,
 
     /// Names we should attempt to persist after each execution.
@@ -84,8 +90,9 @@ impl MontyREPL {
         let mut names = self.tracked_vars.iter().cloned().collect::<Vec<_>>();
         names.sort();
 
-        let (full_code, reserved_names) =
-            build_full_code(&self.namespace, &self.contexts, &names, code);
+        let (input_names, inputs, reserved_names) =
+            build_monty_inputs(&self.namespace, &self.contexts);
+        let full_code = build_full_code(&names, &reserved_names, code);
 
         // Run Monty in a blocking task so we don't block the async runtime.
         //
@@ -94,32 +101,57 @@ impl MontyREPL {
         // continue running (Tokio can't forcibly kill a thread).
         let host_timeout = std::time::Duration::from_millis(timeout_ms.saturating_add(250));
         let full_code_for_task = full_code.clone();
+        let input_names_for_task = input_names.clone();
+        let inputs_for_task = inputs.clone();
 
         let handle = tokio::task::spawn_blocking(
             move || -> Result<(Option<MontyObject>, String, Option<String>), String> {
-                let runner = MontyRun::new(
-                    full_code_for_task,
-                    "exec.py",
-                    Vec::<String>::new(),
-                    Vec::<String>::new(),
-                )
-                .map_err(|e| format!("monty init failed: {e:?}"))?;
-
-                let limits = ResourceLimits::new()
-                    .max_duration(std::time::Duration::from_millis(timeout_ms))
-                    // 64 MiB per execution (best-effort).
-                    .max_memory(64 * 1024 * 1024)
-                    // Keep GC reasonably frequent under allocation-heavy code.
-                    .gc_interval(2_000);
-                let tracker = LimitedTracker::new(limits);
+                fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+                    if let Some(s) = payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    }
+                }
 
                 let mut printer = CollectStringPrint::new();
-                let run_res = runner.run(Vec::<MontyObject>::new(), tracker, &mut printer);
-                let out = printer.into_output();
 
-                match run_res {
-                    Ok(obj) => Ok((Some(obj), out, None)),
-                    Err(e) => Ok((None, out, Some(format!("monty execution failed: {e:?}")))),
+                let unwind_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let runner = MontyRun::new(
+                        full_code_for_task,
+                        "exec.py",
+                        input_names_for_task,
+                        Vec::<String>::new(),
+                    )
+                    .map_err(|e| format!("monty init failed: {e:?}"))?;
+
+                    let limits = ResourceLimits::new()
+                        .max_duration(std::time::Duration::from_millis(timeout_ms))
+                        // 64 MiB per execution (best-effort).
+                        .max_memory(64 * 1024 * 1024)
+                        // Keep GC reasonably frequent under allocation-heavy code.
+                        .gc_interval(2_000);
+                    let tracker = LimitedTracker::new(limits);
+
+                    runner
+                        .run(inputs_for_task, tracker, &mut printer)
+                        .map_err(|e| format!("monty execution failed: {e:?}"))
+                }));
+
+                let out = printer.into_output();
+                match unwind_res {
+                    Ok(Ok(obj)) => Ok((Some(obj), out, None)),
+                    Ok(Err(err)) => Ok((None, out, Some(err))),
+                    Err(payload) => Ok((
+                        None,
+                        out,
+                        Some(format!(
+                            "monty panicked: {}",
+                            panic_payload_to_string(payload)
+                        )),
+                    )),
                 }
             },
         );
@@ -128,7 +160,7 @@ impl MontyREPL {
 
         let mut stdout = String::new();
         let mut error: Option<String> = None;
-        let mut updated_namespace: Option<HashMap<String, String>> = None;
+        let mut updated_namespace: Option<HashMap<String, MontyObject>> = None;
 
         match run_res {
             Err(_) => {
@@ -175,8 +207,8 @@ impl MontyREPL {
         let return_value = self
             .namespace
             .get("return_value")
-            .cloned()
-            .or_else(|| self.namespace.get("result").cloned());
+            .map(|v| v.py_repr())
+            .or_else(|| self.namespace.get("result").map(|v| v.py_repr()));
 
         // If we persisted reserved names (shouldn't happen), drop them defensively.
         if !reserved_names.is_empty() {
@@ -196,7 +228,9 @@ impl MontyREPL {
 }
 
 #[cfg(feature = "monty")]
-fn extract_vars_dict(result: &monty::MontyObject) -> Result<HashMap<String, String>, String> {
+fn extract_vars_dict(
+    result: &monty::MontyObject,
+) -> Result<HashMap<String, monty::MontyObject>, String> {
     use monty::MontyObject;
 
     let MontyObject::Dict(pairs) = result else {
@@ -206,29 +240,25 @@ fn extract_vars_dict(result: &monty::MontyObject) -> Result<HashMap<String, Stri
         ));
     };
 
-    let mut out: HashMap<String, String> = HashMap::new();
-    for (k, v) in pairs {
+    let mut out: HashMap<String, MontyObject> = HashMap::new();
+    for (k, v) in pairs.into_iter() {
         let key = match k {
             MontyObject::String(s) => s.clone(),
             _ => continue,
         };
-        let val = match v {
-            MontyObject::String(s) => s.clone(),
-            MontyObject::Repr(s) => s.clone(),
-            other => other.py_repr(),
-        };
-        out.insert(key, val);
+        out.insert(key, v.clone());
     }
 
     Ok(out)
 }
 
-fn build_full_code(
-    namespace: &HashMap<String, String>,
+#[cfg(feature = "monty")]
+fn build_monty_inputs(
+    namespace: &HashMap<String, monty::MontyObject>,
     contexts: &HashMap<String, String>,
-    tracked_vars: &[String],
-    user_code: &str,
-) -> (String, HashSet<String>) {
+) -> (Vec<String>, Vec<monty::MontyObject>, HashSet<String>) {
+    use monty::MontyObject;
+
     // Stable file ordering for deterministic `context_0`, `context_1`, ...
     let mut files: Vec<(String, String)> = contexts
         .iter()
@@ -251,64 +281,61 @@ fn build_full_code(
     reserved.insert("context".to_string());
     reserved.insert("context_files".to_string());
 
-    let mut preamble = String::new();
-    preamble.push_str("# Auto-injected context\n");
+    let mut input_names: Vec<String> = Vec::new();
+    let mut inputs: Vec<MontyObject> = Vec::new();
 
-    // files = { "trace.json": "...", ... }
-    preamble.push_str("files = {\n");
-    for (name, content) in &files {
-        let key = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
-        let val = serde_json::to_string(content).unwrap_or_else(|_| "\"\"".to_string());
-        preamble.push_str("  ");
-        preamble.push_str(&key);
-        preamble.push_str(": ");
-        preamble.push_str(&val);
-        preamble.push_str(",\n");
-    }
-    preamble.push_str("}\n");
+    // Inject files/context as Monty inputs to avoid massive string literals in source.
+    reserved.insert("files".to_string());
+    input_names.push("files".to_string());
+    inputs.push(MontyObject::dict(
+        files
+            .iter()
+            .map(|(name, content)| {
+                (
+                    MontyObject::String(name.clone()),
+                    MontyObject::String(content.clone()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    ));
 
-    preamble.push_str("context_files = list(files.keys())\n");
+    reserved.insert("context_files".to_string());
+    input_names.push("context_files".to_string());
+    inputs.push(MontyObject::List(
+        files
+            .iter()
+            .map(|(name, _)| MontyObject::String(name.clone()))
+            .collect(),
+    ));
 
-    let default_context_lit =
-        serde_json::to_string(&default_context).unwrap_or_else(|_| "\"\"".to_string());
-    preamble.push_str("context = ");
-    preamble.push_str(&default_context_lit);
-    preamble.push_str("\n");
+    reserved.insert("context".to_string());
+    input_names.push("context".to_string());
+    inputs.push(MontyObject::String(default_context));
 
-    // context_0..context_N derived from sorted files
     for (idx, (_name, content)) in files.iter().enumerate() {
         let var = format!("context_{idx}");
         reserved.insert(var.clone());
-        let lit = serde_json::to_string(content).unwrap_or_else(|_| "\"\"".to_string());
-        preamble.push_str(&var);
-        preamble.push_str(" = ");
-        preamble.push_str(&lit);
-        preamble.push_str("\n");
+        input_names.push(var);
+        inputs.push(MontyObject::String(content.clone()));
     }
 
-    preamble.push('\n');
-    preamble.push_str("# Auto-injected persisted variables\n");
-
-    // Re-inject previous variables as Python literals. Wrap each assignment in
-    // a try/except so one bad value doesn't poison the whole run.
-    let mut names: Vec<&String> = namespace.keys().collect();
-    names.sort();
-    for name in names {
-        if name.starts_with('_') {
+    // Persisted variables from previous runs (best-effort).
+    let mut persisted_names: Vec<&String> = namespace.keys().collect();
+    persisted_names.sort();
+    for name in persisted_names {
+        if name.starts_with('_') || reserved.contains(name) {
             continue;
         }
-        if reserved.contains(name) {
-            continue;
-        }
-        if let Some(value_src) = namespace.get(name) {
-            preamble.push_str("try:\n  ");
-            preamble.push_str(name);
-            preamble.push_str(" = ");
-            preamble.push_str(value_src);
-            preamble.push_str("\nexcept Exception:\n  pass\n");
+        if let Some(value) = namespace.get(name) {
+            input_names.push(name.clone());
+            inputs.push(value.clone());
         }
     }
 
+    (input_names, inputs, reserved)
+}
+
+fn build_full_code(tracked_vars: &[String], reserved: &HashSet<String>, user_code: &str) -> String {
     // Epilogue: persist a selected set of names.
     //
     // Monty doesn't implement `locals()`/`globals()`, so we can't introspect variable names.
@@ -331,22 +358,19 @@ fn build_full_code(
         epilogue.push_str("):\n");
         epilogue.push_str("        __vars__[");
         epilogue.push_str(&key);
-        epilogue.push_str("] = repr(");
+        epilogue.push_str("] = ");
         epilogue.push_str(name);
-        epilogue.push_str(")\n");
+        epilogue.push_str("\n");
         epilogue.push_str("except Exception:\n");
         epilogue.push_str("    pass\n");
     }
     epilogue.push_str("__vars__\n");
 
     let mut full = String::new();
-    full.push_str(&preamble);
-    full.push('\n');
     full.push_str(user_code);
     full.push('\n');
     full.push_str(&epilogue);
-
-    (full, reserved)
+    full
 }
 
 fn discover_assigned_names(code: &str) -> HashSet<String> {
