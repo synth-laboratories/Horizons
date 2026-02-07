@@ -1,3 +1,6 @@
+use crate::admin;
+use crate::auth::CentralDbApiKeyAuth;
+use crate::extract::AuthProviderExt;
 use crate::routes;
 use axum::routing::get;
 use axum::{Extension, Router};
@@ -10,6 +13,7 @@ use horizons_core::evaluation::engine::EvaluationEngine;
 use horizons_core::events::traits::EventBus;
 #[cfg(feature = "memory")]
 use horizons_core::memory::traits::HorizonsMemory;
+use horizons_core::onboard::secrets::CredentialManager;
 use horizons_core::onboard::traits::{
     Cache, CentralDb, Filestore, GraphStore, ProjectDb, VectorStore,
 };
@@ -39,6 +43,8 @@ pub struct AppState {
     pub context_refresh: Arc<dyn ContextRefresh>,
     pub core_agents: Arc<CoreAgentsExecutor>,
     pub pipelines: Arc<dyn PipelineRunner>,
+    /// Optional credential manager for `$cred:` resolution and credential CRUD routes.
+    pub credential_manager: Option<Arc<CredentialManager>>,
     /// MCP gateway for tool proxying (optional; configured via env).
     pub mcp_gateway: Option<Arc<McpGateway>>,
     /// Sandbox runtime for executing coding agents in containers.
@@ -69,6 +75,7 @@ impl AppState {
         context_refresh: Arc<dyn ContextRefresh>,
         core_agents: Arc<CoreAgentsExecutor>,
         pipelines: Arc<dyn PipelineRunner>,
+        credential_manager: Option<Arc<CredentialManager>>,
         mcp_gateway: Option<Arc<McpGateway>>,
         sandbox_runtime: Option<Arc<SandboxRuntime>>,
         #[cfg(feature = "memory")] memory: Arc<dyn HorizonsMemory>,
@@ -89,6 +96,7 @@ impl AppState {
             context_refresh,
             core_agents,
             pipelines,
+            credential_manager,
             mcp_gateway,
             sandbox_runtime,
             #[cfg(feature = "memory")]
@@ -107,10 +115,16 @@ impl AppState {
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn router(state: AppState) -> Router {
     let state = Arc::new(state);
+    // Provide Bearer-token auth support via `AuthenticatedIdentity` extractor.
+    // Enforcement is controlled by env vars in `extract.rs` (dev headers remain default).
+    let auth_provider =
+        AuthProviderExt(Arc::new(CentralDbApiKeyAuth::new(state.central_db.clone())));
     Router::new()
         .merge(routes::router())
+        .merge(admin::router())
         .route("/health", get(routes::health::get_health))
         .layer(Extension(state))
+        .layer(Extension(auth_provider))
         .layer(SetRequestIdLayer::new(
             axum::http::HeaderName::from_static("x-request-id"),
             MakeRequestUuid,

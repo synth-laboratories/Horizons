@@ -21,6 +21,7 @@ redis = { version = "0.27.6", features = ["aio", "tokio-comp", "connection-manag
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.139"
 serde_yaml = "0.9"
+sha2 = "0.10"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "json"] }
 thiserror = "2.0.11"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal"] }
@@ -33,6 +34,8 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "jso
 ulid = "1.2.1"
 uuid = { version = "1.15.1", features = ["serde", "v4"] }
 voyager = { path = "../voyager", optional = true }
+leptos = { version = "0.6.15", default-features = false, features = ["ssr"] }
+utoipa = "5.4.0"
 
 [features]
 default = []
