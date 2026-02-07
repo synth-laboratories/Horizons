@@ -1,6 +1,7 @@
 <div align="center">
   <h1>Horizons</h1>
   <p>Self-hostable agent platform. Define agents, give them tools, run them in sandboxes, govern their actions.</p>
+  <p><a href="https://www.usesynth.ai">https://www.usesynth.ai</a></p>
   <p>
     <a href="https://github.com/synth-laboratories/Horizons/actions/workflows/ci.yml?query=branch%3Adev"><img alt="CI" src="https://github.com/synth-laboratories/Horizons/actions/workflows/ci.yml/badge.svg?branch=dev"></a>
     <a href="LICENSE.md"><img alt="License" src="https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue"></a>
