@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Horizons</h1>
-  <p>Rust-first runtime for shipping agent systems: event-driven orchestration, project-scoped state, graph execution, and auditable actions.</p>
+  <p>Self-hostable agent platform. Define agents, give them tools, run them in sandboxes, govern their actions.</p>
   <p>
     <a href="https://github.com/synth-laboratories/Horizons/actions/workflows/ci.yml?query=branch%3Adev"><img alt="CI" src="https://github.com/synth-laboratories/Horizons/actions/workflows/ci.yml/badge.svg?branch=dev"></a>
     <a href="LICENSE.md"><img alt="License" src="https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue"></a>
@@ -10,12 +10,57 @@
   </p>
   <p>
     <a href="#quickstart">Quickstart</a> ·
+    <a href="#features">Features</a> ·
     <a href="#install-the-sdks">Install the SDKs</a> ·
     <a href="#from-source">From source</a> ·
-    <a href="#graph-api">Graph API</a> ·
+    <a href="#api-overview">API overview</a> ·
     <a href="#repo-layout">Repo layout</a>
   </p>
 </div>
+
+---
+
+## Features
+
+### Agents and actions
+
+Register agents as declarative specs (name, sandbox image, allowed tools, schedule). Run them on-demand or on cron. Agents propose actions; actions go through approval gates (auto-approve, AI review, or human review) before execution. Every action is recorded in an append-only audit log.
+
+### MCP gateway with auth
+
+Built-in [MCP](https://modelcontextprotocol.io) gateway supporting stdio and HTTP transports. Scope-based authorization per tool, per agent. Agents call your internal APIs and services through MCP — the gateway enforces what each agent is allowed to do.
+
+- Configure MCP servers: `POST /api/v1/mcp/config`
+- List available tools: `GET /api/v1/mcp/tools`
+- Call a tool: `POST /api/v1/mcp/call`
+
+### Secrets management
+
+Per-org encrypted credential storage (AES-256-GCM). Store API keys, database credentials, service tokens. Secrets are injected at runtime via token resolution (`$cred:connector_id.key`) — agents never see raw credentials in config.
+
+### Sandboxed execution
+
+Agents run in isolated containers via the Rhodes adapter. Supports Docker (local dev) and Daytona (cloud, with snapshotted images for ~3s provisioning). Filesystem overrides let you inject files (AGENTS.md, skills files, config) and environment variables into the sandbox before the agent starts.
+
+### Event-driven orchestration
+
+Bidirectional event bus (Redis pub/sub + Postgres event store). Publish/subscribe with routing rules, retry policies, dead-letter queues, and webhook delivery. Agents, connectors, and pipelines communicate through events.
+
+### Context refresh
+
+Connectors ingest external data into durable, per-org context stores. Agents read from these stores at runtime. Built-in connectors for common services; write your own as a simple trait impl.
+
+### Graph execution engine
+
+DAG-based execution engine for structured agent workflows. LLM nodes, Python function nodes, tool-call nodes. Built-in verifier graph registry (rubric scoring, contrastive verification, few-shot, RLM). Define graphs in YAML, execute via API.
+
+### Multi-tenant by default
+
+All data and operations are scoped by `x-org-id`. Tenant isolation is enforced at the trait level — every storage backend, event bus, and agent execution path is org-scoped.
+
+### API-first, SDKs in three languages
+
+REST API (Axum). SDKs for Python, TypeScript, and Rust. No UI required — everything is programmable.
 
 ---
 
@@ -69,47 +114,32 @@ Python execution backends:
 - Default: local `python3` subprocess.
 - Optional: embedded interpreter via [pydantic/monty](https://github.com/pydantic/monty) (requires `--features graph_monty` and `HORIZONS_GRAPH_PYTHON_BACKEND=monty`).
 
-## Graph API
+## API overview
 
-Horizons exposes the graph engine under `/api/v1/graph/*`.
+All endpoints require an `x-org-id` header for tenant isolation. Most also accept `x-project-id`.
 
-List built-in graphs:
+| Area | Endpoints | Description |
+|------|-----------|-------------|
+| **Agents** | `POST /api/v1/agents/run`, `POST /api/v1/agents/chat` (SSE), `GET /api/v1/agents` | Run agents, stream agent chat, list registered agents |
+| **Actions** | `POST /api/v1/actions/propose`, `POST /api/v1/actions/:id/approve`, `POST /api/v1/actions/:id/deny`, `GET /api/v1/actions/pending` | Action proposal and approval lifecycle |
+| **MCP** | `POST /api/v1/mcp/config`, `GET /api/v1/mcp/tools`, `POST /api/v1/mcp/call` | MCP server configuration and tool execution |
+| **Engine** | `POST /api/v1/engine/run`, `POST /api/v1/engine/start`, `GET /api/v1/engine/:id/events` (SSE) | Sandbox provisioning and agent execution |
+| **Events** | `POST /api/v1/events/publish`, `POST /api/v1/events/subscribe`, `GET /api/v1/events/stream` (SSE) | Event bus pub/sub |
+| **Graph** | `POST /api/v1/graph/execute`, `POST /api/v1/graph/validate`, `GET /api/v1/graph/registry` | DAG execution and verifier registry |
+| **Context** | `POST /api/v1/context_refresh/connectors`, `POST /api/v1/context_refresh/sync` | Connector registration and data sync |
+| **Pipelines** | `POST /api/v1/pipelines/run`, `GET /api/v1/pipelines/:id/status` | Multi-step pipeline orchestration |
+| **Storage** | `POST /api/v1/filestore/upload`, `GET /api/v1/filestore/:key` | Per-org file storage |
+| **Projects** | `POST /api/v1/projects`, `GET /api/v1/projects` | Project management |
+| **Audit** | `GET /api/v1/audit/log` | Append-only audit trail |
+| **Config** | `GET /api/v1/config`, `PUT /api/v1/config` | Runtime configuration |
 
-```bash
-curl -sS \
-  -H "x-org-id: $ORG_ID" \
-  -H "x-project-id: $PROJECT_ID" \
-  "http://localhost:8000/api/v1/graph/registry"
-```
+Optional feature-gated endpoints (compile with `--features memory`, `optimization`, `evaluation`, or `all`):
 
-Validate a built-in graph:
-
-```bash
-curl -sS \
-  -H "x-org-id: $ORG_ID" \
-  -H "x-project-id: $PROJECT_ID" \
-  -X POST "http://localhost:8000/api/v1/graph/validate" \
-  -d '{"graph_id":"verifier_rubric_single","strictness":"strict"}'
-```
-
-Execute a graph from YAML:
-
-```bash
-curl -sS \
-  -H "x-org-id: $ORG_ID" \
-  -H "x-project-id: $PROJECT_ID" \
-  -X POST "http://localhost:8000/api/v1/graph/execute" \
-  -d '{
-    "graph_yaml": "name: hello\nstart_nodes: [n1]\nend_nodes: [n1]\nnodes:\n  n1:\n    name: n1\n    type: DagNode\n    input_mapping: \"{}\"\n    implementation:\n      type: python_function\n      fn_name: main\n      fn_str: |\n        def main():\n            return {\"ok\": True}\ncontrol_edges:\n  n1: []\n",
-    "inputs": {}
-  }'
-```
-
-Notes:
-
-- The HTTP layer injects `"_horizons": {"org_id": "...", "project_id": "..."}` into graph inputs.
-- LLM nodes resolve API keys from `GRAPH_LLM_API_KEY` and provider-specific env vars (e.g. `OPENAI_API_KEY`).
-- Tool calls can be routed to a remote executor via `GRAPH_TOOL_EXECUTOR_URL` (optional).
+| Feature | Endpoints | Description |
+|---------|-----------|-------------|
+| **Memory** | `/api/v1/memory/*` | Embed, retrieve, rank (Voyager) |
+| **Optimization** | `/api/v1/optimization/*` | Prompt/policy optimization (MIPRO v2) |
+| **Evaluation** | `/api/v1/evaluation/*` | Reward verification (RLM) |
 
 ## Repo layout
 
