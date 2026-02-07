@@ -25,6 +25,13 @@ pub struct MontyREPL {
     /// Persisted Python namespace: variable_name -> python literal (repr-like) string.
     namespace: HashMap<String, String>,
 
+    /// Names we should attempt to persist after each execution.
+    ///
+    /// Monty doesn't implement `locals()`/`globals()`, so we can't enumerate variables
+    /// dynamically. Instead we heuristically extract assigned names from the user's code
+    /// and then explicitly persist only those names.
+    tracked_vars: HashSet<String>,
+
     /// Injected context content. Keys are typically filenames; a special key `context`
     /// may be set to force the default `context` string.
     contexts: HashMap<String, String>,
@@ -73,7 +80,12 @@ impl MontyREPL {
 
         let start = std::time::Instant::now();
 
-        let (full_code, reserved_names) = build_full_code(&self.namespace, &self.contexts, code);
+        self.tracked_vars.extend(discover_assigned_names(code));
+        let mut names = self.tracked_vars.iter().cloned().collect::<Vec<_>>();
+        names.sort();
+
+        let (full_code, reserved_names) =
+            build_full_code(&self.namespace, &self.contexts, &names, code);
 
         // Run Monty in a blocking task so we don't block the async runtime.
         //
@@ -214,6 +226,7 @@ fn extract_vars_dict(result: &monty::MontyObject) -> Result<HashMap<String, Stri
 fn build_full_code(
     namespace: &HashMap<String, String>,
     contexts: &HashMap<String, String>,
+    tracked_vars: &[String],
     user_code: &str,
 ) -> (String, HashSet<String>) {
     // Stable file ordering for deterministic `context_0`, `context_1`, ...
@@ -296,29 +309,35 @@ fn build_full_code(
         }
     }
 
-    // Epilogue: persist locals as repr strings, excluding injected helpers.
+    // Epilogue: persist a selected set of names.
     //
-    // We only persist a conservative set of types that are likely to roundtrip as literals.
-    // (e.g. modules, compiled regexes, file handles won't persist cleanly.)
-    let mut reserved_list = reserved.iter().cloned().collect::<Vec<_>>();
-    reserved_list.sort();
-    let reserved_py = serde_json::to_string(&reserved_list).unwrap_or_else(|_| "[]".to_string());
-
-    let epilogue = format!(
-        r#"
-# Epilogue: collect user-defined variables
-def __persistable(v):
-    return isinstance(v, (int, float, bool, str, list, dict, tuple, set, type(None)))
-
-__reserved__ = set({reserved_py})
-__vars__ = {{
-    k: repr(v)
-    for (k, v) in locals().items()
-    if k not in __reserved__ and not k.startswith('_') and __persistable(v)
-}}
-__vars__
-"#
+    // Monty doesn't implement `locals()`/`globals()`, so we can't introspect variable names.
+    // We instead persist `tracked_vars`, derived from the user's code (best-effort).
+    let mut epilogue = String::new();
+    epilogue.push_str("\n# Epilogue: collect selected variables\n");
+    epilogue.push_str("def __persistable(v):\n");
+    epilogue.push_str(
+        "    return isinstance(v, (int, float, bool, str, list, dict, tuple, set, type(None)))\n",
     );
+    epilogue.push_str("__vars__ = {}\n");
+    for name in tracked_vars {
+        if name.starts_with('_') || reserved.contains(name) {
+            continue;
+        }
+        let key = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
+        epilogue.push_str("try:\n");
+        epilogue.push_str("    if __persistable(");
+        epilogue.push_str(name);
+        epilogue.push_str("):\n");
+        epilogue.push_str("        __vars__[");
+        epilogue.push_str(&key);
+        epilogue.push_str("] = repr(");
+        epilogue.push_str(name);
+        epilogue.push_str(")\n");
+        epilogue.push_str("except Exception:\n");
+        epilogue.push_str("    pass\n");
+    }
+    epilogue.push_str("__vars__\n");
 
     let mut full = String::new();
     full.push_str(&preamble);
@@ -328,6 +347,197 @@ __vars__
     full.push_str(&epilogue);
 
     (full, reserved)
+}
+
+fn discover_assigned_names(code: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+
+    for raw_line in code.lines() {
+        let line = raw_line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // def name(...):
+        if let Some(rest) = line.strip_prefix("def ") {
+            if let Some(name) = rest
+                .split(|c: char| c == '(' || c.is_whitespace() || c == ':')
+                .next()
+            {
+                if is_ident(name) {
+                    out.insert(name.to_string());
+                }
+            }
+            continue;
+        }
+
+        // class Name:
+        if let Some(rest) = line.strip_prefix("class ") {
+            if let Some(name) = rest
+                .split(|c: char| c == '(' || c.is_whitespace() || c == ':')
+                .next()
+            {
+                if is_ident(name) {
+                    out.insert(name.to_string());
+                }
+            }
+            continue;
+        }
+
+        // import a as b, c
+        if let Some(rest) = line.strip_prefix("import ") {
+            for item in rest.split(',') {
+                let item = item.trim();
+                if item.is_empty() {
+                    continue;
+                }
+                let mut parts = item.split_whitespace();
+                let module = parts.next().unwrap_or("");
+                let mut name = module.split('.').next().unwrap_or("").to_string();
+                if let Some(maybe_as) = parts.next() {
+                    if maybe_as == "as" {
+                        if let Some(alias) = parts.next() {
+                            name = alias.to_string();
+                        }
+                    }
+                }
+                if is_ident(&name) {
+                    out.insert(name);
+                }
+            }
+            continue;
+        }
+
+        // from m import x as y, z
+        if let Some(rest) = line.strip_prefix("from ") {
+            if let Some((_, imports)) = rest.split_once(" import ") {
+                for item in imports.split(',') {
+                    let item = item.trim();
+                    if item.is_empty() || item == "*" {
+                        continue;
+                    }
+                    let mut parts = item.split_whitespace();
+                    let imported = parts.next().unwrap_or("");
+                    let mut name = imported.to_string();
+                    if let Some(maybe_as) = parts.next() {
+                        if maybe_as == "as" {
+                            if let Some(alias) = parts.next() {
+                                name = alias.to_string();
+                            }
+                        }
+                    }
+                    if is_ident(&name) {
+                        out.insert(name);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // for x in ...:
+        if let Some(rest) = line.strip_prefix("for ") {
+            if let Some((lhs, _)) = rest.split_once(" in ") {
+                for token in lhs.split(',') {
+                    let t = token.trim().trim_matches(|c: char| c == '(' || c == ')');
+                    if is_ident(t) {
+                        out.insert(t.to_string());
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Simple/augmented assignments.
+        if let Some(names) = try_extract_assignment_lhs_names(line) {
+            for name in names {
+                if is_ident(&name) {
+                    out.insert(name);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn try_extract_assignment_lhs_names(line: &str) -> Option<Vec<String>> {
+    // Quick path for common `name = ...` or `name += ...`
+    let mut i = 0usize;
+    let bytes = line.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    // Parse leading identifier.
+    if !is_ident_start(bytes[0]) {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() && is_ident_continue(bytes[i]) {
+        i += 1;
+    }
+    let name = &line[..i];
+
+    // Skip whitespace.
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let rest = &line[i..];
+
+    const OPS: &[&str] = &[
+        "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "**=", "//=",
+    ];
+    if OPS.iter().any(|op| rest.starts_with(op)) {
+        return Some(vec![name.to_string()]);
+    }
+
+    // Fallback: destructuring `a, b = ...`
+    let eq = line.find('=')?;
+    // Reject comparisons like `==`, `!=`, `<=`, `>=`, `:=`
+    let after = &line[eq..];
+    if after.starts_with("==")
+        || after.starts_with("!=")
+        || after.starts_with(">=")
+        || after.starts_with("<=")
+        || after.starts_with(":=")
+    {
+        return None;
+    }
+
+    let lhs = line[..eq].trim();
+    if lhs.is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    for token in lhs.split(',') {
+        let t = token
+            .trim()
+            .trim_matches(|c: char| c == '(' || c == ')' || c == '[' || c == ']');
+        if is_ident(t) {
+            out.push(t.to_string());
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut bytes = s.as_bytes().iter().copied();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !is_ident_start(first) {
+        return false;
+    }
+    bytes.all(is_ident_continue)
+}
+
+fn is_ident_start(b: u8) -> bool {
+    (b'A'..=b'Z').contains(&b) || (b'a'..=b'z').contains(&b) || b == b'_'
+}
+
+fn is_ident_continue(b: u8) -> bool {
+    is_ident_start(b) || (b'0'..=b'9').contains(&b)
 }
 
 // Keep unused imports if the file is built without monty.
