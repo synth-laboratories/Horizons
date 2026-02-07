@@ -10,6 +10,7 @@ export { OptimizationAPI } from "./optimization";
 export { EvaluationAPI } from "./evaluation";
 export { EngineAPI } from "./engine";
 export { PipelinesAPI } from "./pipelines";
+export { McpAPI } from "./mcp";
 export type {
   AgentKind,
   PermissionMode,

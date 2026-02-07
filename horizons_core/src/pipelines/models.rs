@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipelineSpec {
     pub id: String,
     pub org_id: String,
@@ -11,7 +11,7 @@ pub struct PipelineSpec {
     pub on_failure: FailurePolicy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipelineStep {
     pub id: String,
     pub kind: StepKind,
@@ -28,7 +28,7 @@ pub struct PipelineStep {
     pub retry_policy: Option<RetryPolicy>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StepKind {
     Agent { spec: AgentSpec },
     GraphRun { graph_id: String },
@@ -37,7 +37,7 @@ pub enum StepKind {
     Custom { handler: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSpec {
     /// Identifier understood by the configured `Subagent` implementation (often a core agent id).
     pub role: String,
@@ -47,13 +47,13 @@ pub struct AgentSpec {
     pub context: Value,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
     pub backoff_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailurePolicy {
     Halt,
@@ -90,7 +90,7 @@ pub struct StepResult {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     Queued,

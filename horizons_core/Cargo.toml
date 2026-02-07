@@ -24,7 +24,7 @@ serde = { version = "1.0.218", features = ["derive"] }
 serde_bytes = "0.11.15"
 serde_json = "1.0.139"
 sha2 = "0.10"
-sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "sqlite", "uuid"] }
 thiserror = "2.0.11"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1.17"
@@ -35,6 +35,7 @@ ulid = { version = "1", features = ["serde"] }
 uuid = { version = "1.15.1", features = ["serde", "v4"] }
 prost = "0.13"
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+aes-gcm = "0.10"
 rand = "0.8"
 regex = "1"
 cron = "0.15"

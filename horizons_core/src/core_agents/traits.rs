@@ -1,6 +1,6 @@
 use crate::Result;
 use crate::core_agents::models::{
-    ActionProposal, AgentContext, AgentRunResult, ReviewMode, ReviewPolicy,
+    ActionProposal, AgentContext, AgentOutcome, AgentRunResult, ReviewMode, ReviewPolicy,
 };
 use crate::models::{AgentIdentity, OrgId, ProjectDbHandle, ProjectId};
 use async_trait::async_trait;
@@ -18,11 +18,33 @@ pub trait AgentSpec: Send + Sync {
     async fn id(&self) -> String;
     async fn name(&self) -> String;
 
+    /// Run the agent. Return an `AgentOutcome` describing the results.
+    ///
+    /// - `AgentOutcome::Proposals(vec)` — classic proposal-only agents.
+    /// - `AgentOutcome::SideEffectOnly { result }` — agents that do their own
+    ///   DB writes or external calls and don't need the approval pipeline.
+    /// - `AgentOutcome::Mixed { result, proposals }` — both.
+    ///
+    /// For backward compatibility, the default implementation wraps the legacy
+    /// `run_legacy` method that returns `Vec<ActionProposal>`.
     async fn run(
         &self,
         ctx: AgentContext,
         inputs: Option<serde_json::Value>,
-    ) -> Result<Vec<ActionProposal>>;
+    ) -> Result<AgentOutcome> {
+        let proposals = self.run_legacy(ctx, inputs).await?;
+        Ok(AgentOutcome::Proposals(proposals))
+    }
+
+    /// Legacy entrypoint for agents that only return proposals.
+    /// Override `run` directly for new agents; this exists only for backward compat.
+    async fn run_legacy(
+        &self,
+        _ctx: AgentContext,
+        _inputs: Option<serde_json::Value>,
+    ) -> Result<Vec<ActionProposal>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Optional AI-review interface for medium-risk actions.
@@ -54,6 +76,9 @@ pub trait CoreAgents: Send + Sync {
 
     async fn propose_action(
         &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        project_db: &ProjectDbHandle,
         proposal: ActionProposal,
         identity: &AgentIdentity,
     ) -> Result<Uuid>;
@@ -64,7 +89,7 @@ pub trait CoreAgents: Send + Sync {
         project_id: ProjectId,
         project_db: &ProjectDbHandle,
         action_id: Uuid,
-        approver_id: &str,
+        identity: &AgentIdentity,
         reason: &str,
     ) -> Result<()>;
 
@@ -74,7 +99,7 @@ pub trait CoreAgents: Send + Sync {
         project_id: ProjectId,
         project_db: &ProjectDbHandle,
         action_id: Uuid,
-        approver_id: &str,
+        identity: &AgentIdentity,
         reason: &str,
     ) -> Result<()>;
 

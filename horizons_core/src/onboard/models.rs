@@ -1,3 +1,4 @@
+use crate::models::AgentIdentity;
 use crate::models::{OrgId, ProjectId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,65 @@ pub struct ConnectorCredential {
     pub updated_at: DateTime<Utc>,
 }
 
+/// API key record for authentication (bearer token).
+///
+/// `secret_hash` is stored but not intended to be exposed via APIs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiKeyRecord {
+    pub key_id: Uuid,
+    pub org_id: OrgId,
+    pub name: String,
+    pub actor: AgentIdentity,
+    pub scopes: Vec<String>,
+    #[serde(skip_serializing, default)]
+    pub secret_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Managed integration resource (Retool-like "Resource").
+///
+/// `config` is resource-type-specific JSON (e.g. HTTP base URL + env variants).
+/// Secrets should be referenced via `$cred:connector_id.key` tokens and resolved
+/// at runtime (not stored inline as plaintext).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceRecord {
+    pub org_id: OrgId,
+    pub resource_id: String,
+    pub resource_type: String,
+    pub config: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Managed operation/query (Retool-like "Query").
+///
+/// `config` is operation-type-specific JSON (e.g. HTTP path, headers, timeout).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationRecord {
+    pub org_id: OrgId,
+    pub operation_id: String,
+    pub resource_id: String,
+    pub operation_type: String,
+    pub config: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Execution record for an operation, used for auditability/debugging.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationRunRecord {
+    pub id: Uuid,
+    pub org_id: OrgId,
+    pub operation_id: String,
+    pub source_event_id: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub output: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Identifies a sync cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStateKey {
@@ -154,4 +214,181 @@ pub struct CacheEntry {
     #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
     pub ttl: Option<Duration>,
+}
+
+// ── ProjectDb row extraction helpers ────────────────────────────
+//
+// These reduce the boilerplate of extracting typed values from a
+// `ProjectDbRow` (BTreeMap<String, ProjectDbValue>). Every accessor
+// returns `Result` so callers can propagate cleanly.
+
+impl ProjectDbValue {
+    /// Extract a `String`, returning an error if the value is a different type.
+    pub fn as_string(&self) -> crate::Result<&str> {
+        match self {
+            ProjectDbValue::String(s) => Ok(s),
+            other => Err(crate::Error::BackendMessage(format!(
+                "expected String, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Extract an `i64`, returning an error if the value is a different type.
+    pub fn as_i64(&self) -> crate::Result<i64> {
+        match self {
+            ProjectDbValue::I64(v) => Ok(*v),
+            other => Err(crate::Error::BackendMessage(format!(
+                "expected I64, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Extract an `f64`, returning an error if the value is a different type.
+    pub fn as_f64(&self) -> crate::Result<f64> {
+        match self {
+            ProjectDbValue::F64(v) => Ok(*v),
+            other => Err(crate::Error::BackendMessage(format!(
+                "expected F64, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Extract a `bool`, returning an error if the value is a different type.
+    pub fn as_bool(&self) -> crate::Result<bool> {
+        match self {
+            ProjectDbValue::Bool(v) => Ok(*v),
+            other => Err(crate::Error::BackendMessage(format!(
+                "expected Bool, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Returns true if the value is `Null`.
+    pub fn is_null(&self) -> bool {
+        matches!(self, ProjectDbValue::Null)
+    }
+}
+
+/// Extension helpers for `ProjectDbRow`.
+pub trait ProjectDbRowExt {
+    /// Get a required String column.
+    fn get_string(&self, col: &str) -> crate::Result<String>;
+
+    /// Get an optional String column (returns None for NULL or missing).
+    fn get_opt_string(&self, col: &str) -> crate::Result<Option<String>>;
+
+    /// Get a required i64 column.
+    fn get_i64(&self, col: &str) -> crate::Result<i64>;
+
+    /// Get an optional i64 column.
+    fn get_opt_i64(&self, col: &str) -> crate::Result<Option<i64>>;
+
+    /// Get a required f64 column.
+    fn get_f64(&self, col: &str) -> crate::Result<f64>;
+
+    /// Parse a required column as JSON into T.
+    fn get_json<T: serde::de::DeserializeOwned>(&self, col: &str) -> crate::Result<T>;
+
+    /// Parse an optional column as JSON into T.
+    fn get_opt_json<T: serde::de::DeserializeOwned>(&self, col: &str) -> crate::Result<Option<T>>;
+}
+
+impl ProjectDbRowExt for ProjectDbRow {
+    fn get_string(&self, col: &str) -> crate::Result<String> {
+        match self.get(col) {
+            Some(ProjectDbValue::String(s)) => Ok(s.clone()),
+            Some(v) => Err(crate::Error::BackendMessage(format!(
+                "column '{col}': expected String, got {v:?}"
+            ))),
+            None => Err(crate::Error::BackendMessage(format!(
+                "missing column '{col}'"
+            ))),
+        }
+    }
+
+    fn get_opt_string(&self, col: &str) -> crate::Result<Option<String>> {
+        match self.get(col) {
+            Some(ProjectDbValue::Null) | None => Ok(None),
+            Some(ProjectDbValue::String(s)) if s.trim().is_empty() => Ok(None),
+            Some(ProjectDbValue::String(s)) => Ok(Some(s.clone())),
+            Some(v) => Err(crate::Error::BackendMessage(format!(
+                "column '{col}': expected String|Null, got {v:?}"
+            ))),
+        }
+    }
+
+    fn get_i64(&self, col: &str) -> crate::Result<i64> {
+        match self.get(col) {
+            Some(ProjectDbValue::I64(v)) => Ok(*v),
+            Some(v) => Err(crate::Error::BackendMessage(format!(
+                "column '{col}': expected I64, got {v:?}"
+            ))),
+            None => Err(crate::Error::BackendMessage(format!(
+                "missing column '{col}'"
+            ))),
+        }
+    }
+
+    fn get_opt_i64(&self, col: &str) -> crate::Result<Option<i64>> {
+        match self.get(col) {
+            Some(ProjectDbValue::Null) | None => Ok(None),
+            Some(ProjectDbValue::I64(v)) => Ok(Some(*v)),
+            Some(v) => Err(crate::Error::BackendMessage(format!(
+                "column '{col}': expected I64|Null, got {v:?}"
+            ))),
+        }
+    }
+
+    fn get_f64(&self, col: &str) -> crate::Result<f64> {
+        match self.get(col) {
+            Some(ProjectDbValue::F64(v)) => Ok(*v),
+            Some(v) => Err(crate::Error::BackendMessage(format!(
+                "column '{col}': expected F64, got {v:?}"
+            ))),
+            None => Err(crate::Error::BackendMessage(format!(
+                "missing column '{col}'"
+            ))),
+        }
+    }
+
+    fn get_json<T: serde::de::DeserializeOwned>(&self, col: &str) -> crate::Result<T> {
+        let s = self.get_string(col)?;
+        serde_json::from_str(&s)
+            .map_err(|e| crate::Error::BackendMessage(format!("column '{col}': invalid JSON: {e}")))
+    }
+
+    fn get_opt_json<T: serde::de::DeserializeOwned>(&self, col: &str) -> crate::Result<Option<T>> {
+        match self.get_opt_string(col)? {
+            None => Ok(None),
+            Some(s) => {
+                let v: T = serde_json::from_str(&s).map_err(|e| {
+                    crate::Error::BackendMessage(format!("column '{col}': invalid JSON: {e}"))
+                })?;
+                Ok(Some(v))
+            }
+        }
+    }
+}
+
+/// Run a list of DDL migration statements against a ProjectDb.
+///
+/// Each statement is executed in order. Statements like `CREATE TABLE IF NOT EXISTS`
+/// are idempotent by design. The DDL string is split on `;` and empty fragments are
+/// skipped.
+///
+/// Usage:
+/// ```ignore
+/// const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS foo (id TEXT PRIMARY KEY);";
+/// project_db_migrate(&*project_db, org_id, &handle, SCHEMA).await?;
+/// ```
+pub async fn project_db_migrate(
+    db: &dyn crate::onboard::traits::ProjectDb,
+    org_id: OrgId,
+    handle: &crate::models::ProjectDbHandle,
+    ddl: &str,
+) -> crate::Result<()> {
+    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        db.execute(org_id, handle, stmt, &[]).await?;
+    }
+    Ok(())
 }

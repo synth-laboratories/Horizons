@@ -1,0 +1,323 @@
+# -- Override the chart name.
+nameOverride: ""
+# -- Override the fully qualified app name.
+fullnameOverride: ""
+
+# -- Use an existing Secret instead of creating one.
+# The secret must contain: DATABASE_URL, REDIS_URL, and (optionally)
+# HORIZONS_MASTER_KEY. When set, the chart does not create its own Secret.
+existingSecret: ""
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+server:
+  # -- Number of replicas.
+  replicaCount: 1
+
+  image:
+    # -- Container image repository. Build with the included Dockerfile.
+    repository: ghcr.io/synth-laboratories/horizons
+    # -- Image pull policy.
+    pullPolicy: IfNotPresent
+    # -- Overrides the image tag (defaults to Chart.appVersion).
+    tag: ""
+
+  # -- Image pull secrets (for private registries).
+  imagePullSecrets: []
+
+  # -- Port the server listens on (matches Dockerfile CMD).
+  port: 8000
+
+  # -- Extra environment variables to inject into the server pod.
+  # Example:
+  #   extraEnv:
+  #     - name: RUST_LOG
+  #       value: info,horizons_server=debug
+  extraEnv: []
+
+  # -- Resource requests and limits.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+  # -- Resource presets (uncomment one to override `resources` above).
+  # resourcePreset: small   # 250m / 256Mi — 1 / 512Mi
+  # resourcePreset: medium  # 500m / 512Mi — 2 / 1Gi
+  # resourcePreset: large   # 1    / 1Gi   — 4 / 4Gi
+
+  # -- Node selector.
+  nodeSelector: {}
+
+  # -- Tolerations.
+  tolerations: []
+
+  # -- Affinity.
+  affinity: {}
+
+  # -- Pod-level annotations (e.g. Prometheus scrape config).
+  podAnnotations: {}
+
+  # -- Pod-level labels.
+  podLabels: {}
+
+  # -- Readiness probe.
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  # -- Liveness probe.
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 5
+
+  # -- Rolling update strategy.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Service port.
+  port: 80
+
+# ---------------------------------------------------------------------------
+# Ingress
+# ---------------------------------------------------------------------------
+ingress:
+  # -- Enable Ingress.
+  enabled: false
+  # -- Ingress class name (e.g. nginx, alb).
+  className: ""
+  # -- Annotations (TLS, timeouts, body size, CORS, etc.).
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    # nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- Ingress hosts.
+  hosts:
+    - host: horizons.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration.
+  tls: []
+  #  - secretName: horizons-tls
+  #    hosts:
+  #      - horizons.example.com
+
+# ---------------------------------------------------------------------------
+# Service Account
+# ---------------------------------------------------------------------------
+serviceAccount:
+  # -- Create a ServiceAccount.
+  create: true
+  # -- Annotations for the ServiceAccount (e.g. IAM role for S3).
+  annotations: {}
+  # -- Name override (defaults to fullname).
+  name: ""
+
+# ---------------------------------------------------------------------------
+# Pod Security
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Autoscaling (HPA)
+# ---------------------------------------------------------------------------
+autoscaling:
+  # -- Enable HorizontalPodAutoscaler.
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  # -- Target CPU utilisation (%).
+  targetCPUUtilizationPercentage: 75
+  # -- Target memory utilisation (%).
+  # targetMemoryUtilizationPercentage: 80
+  # -- Custom metrics (queue depth, request rate).
+  # customMetrics: []
+
+# ---------------------------------------------------------------------------
+# Pod Disruption Budget
+# ---------------------------------------------------------------------------
+podDisruptionBudget:
+  # -- Enable PDB.
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# ---------------------------------------------------------------------------
+# Network Policy
+# ---------------------------------------------------------------------------
+networkPolicy:
+  # -- Enable NetworkPolicy.
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# Migrations
+# ---------------------------------------------------------------------------
+migrations:
+  # -- Run DB migrations as a pre-install/pre-upgrade Job.
+  enabled: true
+  # -- Backoff limit for the migration Job.
+  backoffLimit: 3
+  # -- Active deadline for the migration Job (seconds).
+  activeDeadlineSeconds: 300
+
+# ---------------------------------------------------------------------------
+# Data / Persistence (dev-mode local volume)
+# ---------------------------------------------------------------------------
+persistence:
+  # -- Enable a PVC for the /data volume (dev mode, SQLite-backed central DB).
+  # Not needed when using external Postgres.
+  enabled: false
+  # -- Storage class (empty = default).
+  storageClass: ""
+  # -- Access mode.
+  accessModes:
+    - ReadWriteOnce
+  # -- PVC size.
+  size: 5Gi
+  # -- Existing claim name (if you manage PVCs externally).
+  existingClaim: ""
+
+# ---------------------------------------------------------------------------
+# External Postgres (recommended for production)
+# ---------------------------------------------------------------------------
+externalPostgres:
+  # -- Full connection URL.
+  # Example: postgresql://horizons:secret@rds-host:5432/horizons
+  url: ""
+
+# ---------------------------------------------------------------------------
+# External Redis (recommended for production)
+# ---------------------------------------------------------------------------
+externalRedis:
+  # -- Full connection URL.
+  # Example: redis://:password@elasticache-host:6379
+  url: ""
+
+# ---------------------------------------------------------------------------
+# In-cluster Postgres (dev / small installs only)
+# ---------------------------------------------------------------------------
+postgres:
+  # -- Deploy an in-cluster Postgres (pgvector).
+  enabled: false
+  image:
+    repository: pgvector/pgvector
+    tag: pg16
+  user: horizons
+  password: horizons
+  database: horizons
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+
+# ---------------------------------------------------------------------------
+# In-cluster Redis (dev / small installs only)
+# ---------------------------------------------------------------------------
+redis:
+  # -- Deploy an in-cluster Redis.
+  enabled: false
+  image:
+    repository: redis
+    tag: "7"
+  # -- Extra Redis args (AOF enabled by default).
+  args:
+    - redis-server
+    - --appendonly
+    - "yes"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+# ---------------------------------------------------------------------------
+# Secrets / Encryption
+# ---------------------------------------------------------------------------
+secrets:
+  # -- AES-GCM master key for credential encryption (base64, 32 bytes).
+  # Leave empty to auto-generate on first install (stored in the created Secret).
+  masterKey: ""
+
+# ---------------------------------------------------------------------------
+# Object Storage (S3 / GCS)
+# ---------------------------------------------------------------------------
+objectStorage:
+  # -- S3-compatible bucket for the filestore (artifacts, logs).
+  bucket: ""
+  # -- Region (AWS) or endpoint URL (MinIO, GCS interop).
+  region: ""
+  endpoint: ""
+
+# ---------------------------------------------------------------------------
+# Optional Features
+# ---------------------------------------------------------------------------
+features:
+  # -- Vector DB URL for pgvector (defaults to DATABASE_URL if empty).
+  vectorDbUrl: ""
+  # -- Vector dimension (default 64).
+  vectorDim: 64
+  # -- MCP gateway config JSON.
+  mcpConfig: ""
+  # -- MCP scopes (comma-separated).
+  mcpScopes: ""
+  # -- MCP gateway URL.
+  mcpGatewayUrl: ""
+  # -- Sandbox backend: docker | daytona | "" (disabled).
+  sandboxBackend: ""
+  # -- Docker network for sandbox containers.
+  dockerNetwork: ""
+  # -- HelixDB URL (graph store).
+  helixUrl: ""
+  # -- Daytona API URL.
+  daytonaApiUrl: ""
+  # -- Daytona API key.
+  daytonaApiKey: ""

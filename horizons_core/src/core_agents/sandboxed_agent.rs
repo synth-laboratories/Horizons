@@ -5,7 +5,7 @@
 //! runs the coding agent inside, and converts the output into `ActionProposal`s.
 
 use crate::Result;
-use crate::core_agents::models::{ActionProposal, AgentContext, RiskLevel};
+use crate::core_agents::models::{ActionProposal, AgentContext, AgentOutcome, RiskLevel};
 use crate::core_agents::traits::AgentSpec;
 use crate::engine::models::{AgentKind, PermissionMode, SandboxConfig};
 use crate::engine::sandbox_runtime::SandboxRuntime;
@@ -148,7 +148,7 @@ impl AgentSpec for SandboxedAgent {
         &self,
         ctx: AgentContext,
         inputs: Option<serde_json::Value>,
-    ) -> Result<Vec<ActionProposal>> {
+    ) -> Result<AgentOutcome> {
         // Extract instruction from inputs.
         let instruction = inputs
             .as_ref()
@@ -207,6 +207,6 @@ impl AgentSpec for SandboxedAgent {
             3600, // 1 hour TTL
         )?;
 
-        Ok(vec![proposal])
+        Ok(AgentOutcome::Proposals(vec![proposal]))
     }
 }

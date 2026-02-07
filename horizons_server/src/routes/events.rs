@@ -3,7 +3,10 @@ use crate::extract::OrgIdHeader;
 use crate::server::AppState;
 use axum::Extension;
 use axum::Json;
+use axum::body::Bytes;
+use axum::extract::Path;
 use axum::extract::Query;
+use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use horizons_core::events::models::{
@@ -18,7 +21,8 @@ pub fn api_router() -> axum::Router {
     axum::Router::new()
         .route("/events", get(list_events))
         .route("/events/publish", post(publish))
-        .route("/subscriptions", post(subscribe))
+        .route("/subscriptions", post(subscribe).get(list_subscriptions))
+        .route("/subscriptions/{id}", axum::routing::delete(unsubscribe))
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -108,8 +112,28 @@ pub struct InboundRequest {
 pub async fn inbound(
     OrgIdHeader(org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
-    Json(req): Json<InboundRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Optional: enforce inbound webhook signature if configured.
+    if let Ok(secret) = std::env::var("HORIZONS_WEBHOOK_SIGNING_SECRET") {
+        horizons_core::events::webhook::verify_signature_from_headers(&secret, &headers, &body)?;
+    }
+
+    // Align payload-size guardrail with the events subsystem default (or allow override).
+    let max_bytes = std::env::var("HORIZONS_WEBHOOK_MAX_PAYLOAD_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1_000_000);
+    if body.len() > max_bytes {
+        return Err(ApiError::Events(
+            horizons_core::events::Error::PayloadTooLarge,
+        ));
+    }
+
+    let req: InboundRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid json body: {e}")))?;
+
     let event = Event::new(
         org_id.to_string(),
         req.project_id,
@@ -151,4 +175,29 @@ pub async fn subscribe(
     )?;
     let id = state.event_bus.subscribe(sub).await?;
     Ok(Json(serde_json::json!({ "subscription_id": id })))
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn list_subscriptions(
+    OrgIdHeader(org_id): OrgIdHeader,
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<Vec<Subscription>>, ApiError> {
+    let subs = state
+        .event_bus
+        .list_subscriptions(&org_id.to_string())
+        .await?;
+    Ok(Json(subs))
+}
+
+#[tracing::instrument(level = "info", skip_all)]
+pub async fn unsubscribe(
+    OrgIdHeader(org_id): OrgIdHeader,
+    Extension(state): Extension<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .event_bus
+        .unsubscribe(&org_id.to_string(), &id)
+        .await?;
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }

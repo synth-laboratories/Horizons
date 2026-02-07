@@ -1,0 +1,43 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "horizons.fullname" . }}
+  labels:
+    {{- include "horizons.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "horizons.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from the Ingress controller / other pods to the HTTP port.
+    - ports:
+        - port: {{ .Values.server.port }}
+          protocol: TCP
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Postgres (default 5432 + PgBouncer 6432)
+    - ports:
+        - port: 5432
+          protocol: TCP
+        - port: 6432
+          protocol: TCP
+    # Redis
+    - ports:
+        - port: 6379
+          protocol: TCP
+    # HTTPS (webhooks, MCP servers, OTLP, S3, etc.)
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+{{- end }}

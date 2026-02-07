@@ -1,7 +1,9 @@
 use crate::models::{AgentIdentity, OrgId, ProjectDbHandle, ProjectId};
+use crate::onboard::traits::ProjectDb;
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +82,11 @@ pub enum ActionStatus {
     Proposed,
     Approved,
     Denied,
-    Executed,
+    /// The action has been dispatched (e.g. an outbound event was published).
+    ///
+    /// Legacy stored values may use `"executed"`; treat them as dispatched.
+    #[serde(alias = "executed")]
+    Dispatched,
     Expired,
 }
 
@@ -218,12 +224,30 @@ impl ActionProposal {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentContext {
     pub org_id: OrgId,
     pub project_id: ProjectId,
     pub identity: AgentIdentity,
     pub project_db: ProjectDbHandle,
+    /// A live handle to the project database so agents can execute SQL directly
+    /// without needing to construct or hold their own `Arc<dyn ProjectDb>`.
+    pub db: Arc<dyn ProjectDb>,
+    /// Decrypted credentials keyed by connector_id. Populated by the executor
+    /// when a `CredentialManager` is configured.
+    pub credentials: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for AgentContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentContext")
+            .field("org_id", &self.org_id)
+            .field("project_id", &self.project_id)
+            .field("identity", &self.identity)
+            .field("project_db", &self.project_db)
+            .field("credentials", &self.credentials)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -235,4 +259,44 @@ pub struct AgentRunResult {
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub proposed_action_ids: Vec<Uuid>,
+}
+
+/// Return type for agents that may perform side effects directly (e.g. DB writes,
+/// external API calls) instead of / in addition to proposing actions through the
+/// approval pipeline.
+///
+/// `SideEffectOnly` allows agents to report success without returning empty
+/// `Vec<ActionProposal>` which was previously the only option.
+#[derive(Debug, Clone)]
+pub enum AgentOutcome {
+    /// Agent produced action proposals for the approval pipeline.
+    Proposals(Vec<ActionProposal>),
+    /// Agent performed its own side effects and has nothing to propose.
+    /// The `result` value is stored in the audit log for observability.
+    SideEffectOnly { result: serde_json::Value },
+    /// Combination: agent performed side effects AND produced proposals.
+    Mixed {
+        result: serde_json::Value,
+        proposals: Vec<ActionProposal>,
+    },
+}
+
+impl AgentOutcome {
+    /// Extract all proposals (empty vec for SideEffectOnly).
+    pub fn proposals(&self) -> Vec<ActionProposal> {
+        match self {
+            AgentOutcome::Proposals(p) => p.clone(),
+            AgentOutcome::SideEffectOnly { .. } => Vec::new(),
+            AgentOutcome::Mixed { proposals, .. } => proposals.clone(),
+        }
+    }
+
+    /// Extract the side-effect result, if any.
+    pub fn result(&self) -> Option<&serde_json::Value> {
+        match self {
+            AgentOutcome::Proposals(_) => None,
+            AgentOutcome::SideEffectOnly { result } => Some(result),
+            AgentOutcome::Mixed { result, .. } => Some(result),
+        }
+    }
 }

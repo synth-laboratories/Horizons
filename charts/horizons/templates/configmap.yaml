@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "horizons.fullname" . }}
+  labels:
+    {{- include "horizons.labels" . | nindent 4 }}
+data:
+  HORIZONS_DEV_DATA_DIR: "/data"
+  RUST_LOG: "info"
+  {{- if .Values.features.vectorDim }}
+  HORIZONS_VECTOR_DIM: {{ .Values.features.vectorDim | quote }}
+  {{- end }}
+  {{- if .Values.features.mcpScopes }}
+  HORIZONS_MCP_SCOPES: {{ .Values.features.mcpScopes | quote }}
+  {{- end }}
+  {{- if .Values.features.mcpGatewayUrl }}
+  MCP_GATEWAY_URL: {{ .Values.features.mcpGatewayUrl | quote }}
+  {{- end }}
+  {{- if .Values.features.sandboxBackend }}
+  HORIZONS_SANDBOX_BACKEND: {{ .Values.features.sandboxBackend | quote }}
+  {{- end }}
+  {{- if .Values.features.dockerNetwork }}
+  HORIZONS_DOCKER_NETWORK: {{ .Values.features.dockerNetwork | quote }}
+  {{- end }}
+  {{- if .Values.features.helixUrl }}
+  HORIZONS_HELIX_URL: {{ .Values.features.helixUrl | quote }}
+  {{- end }}
+  {{- if .Values.objectStorage.bucket }}
+  HORIZONS_S3_BUCKET: {{ .Values.objectStorage.bucket | quote }}
+  {{- end }}
+  {{- if .Values.objectStorage.region }}
+  AWS_REGION: {{ .Values.objectStorage.region | quote }}
+  {{- end }}
+  {{- if .Values.objectStorage.endpoint }}
+  AWS_ENDPOINT_URL: {{ .Values.objectStorage.endpoint | quote }}
+  {{- end }}

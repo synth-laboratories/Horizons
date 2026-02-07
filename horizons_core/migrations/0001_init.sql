@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS source_configs (
   schedule_expr TEXT,
   schedule_next_run_at TIMESTAMPTZ,
   event_triggers JSONB NOT NULL,
+  processor JSONB NOT NULL DEFAULT '{"type":"connector"}',
   settings JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
@@ -115,3 +116,68 @@ CREATE TABLE IF NOT EXISTS refresh_runs (
 
 CREATE INDEX IF NOT EXISTS refresh_runs_org_started_at_idx ON refresh_runs(org_id, started_at DESC);
 
+-- ----------------------------------------------------------------------------
+-- Managed assets: Resources + Operations (Retool-style non-UI core)
+--
+-- These power governed outbound/integration calls (e.g. Event Sync subscriptions)
+-- and provide a stable registry for endpoints, env separation, and auditing.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS resources (
+  org_id UUID NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  resource_id TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  config JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (org_id, resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS operations (
+  org_id UUID NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  operation_id TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  operation_type TEXT NOT NULL,
+  config JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (org_id, operation_id)
+);
+
+CREATE INDEX IF NOT EXISTS operations_org_resource_idx ON operations(org_id, resource_id);
+
+CREATE TABLE IF NOT EXISTS operation_runs (
+  id UUID PRIMARY KEY,
+  org_id UUID NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  operation_id TEXT NOT NULL,
+  source_event_id TEXT,
+  status TEXT NOT NULL,
+  error TEXT,
+  output JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS operation_runs_org_created_at_idx ON operation_runs(org_id, created_at DESC);
+
+-- ----------------------------------------------------------------------------
+-- API keys (bearer tokens) for authentication.
+--
+-- Token format (recommended): `hzn_<key_id>.<secret>` where:
+-- - key_id is a UUID
+-- - secret is a random opaque string (stored hashed)
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  key_id UUID PRIMARY KEY,
+  org_id UUID NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  actor JSONB NOT NULL,
+  scopes JSONB NOT NULL,
+  secret_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ,
+  last_used_at TIMESTAMPTZ,
+  UNIQUE (org_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS api_keys_org_idx ON api_keys(org_id);

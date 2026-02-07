@@ -58,8 +58,17 @@ impl ApiError {
                 | horizons_core::events::Error::InvalidTopicPattern
                 | horizons_core::events::Error::InvalidSubscriptionHandler
                 | horizons_core::events::Error::InvalidQuery => StatusCode::BAD_REQUEST,
+                horizons_core::events::Error::SignatureVerificationFailed => {
+                    StatusCode::UNAUTHORIZED
+                }
+                horizons_core::events::Error::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
                 horizons_core::events::Error::Message { .. } => StatusCode::BAD_REQUEST,
-                _ => StatusCode::BAD_REQUEST,
+                horizons_core::events::Error::WebhookNonSuccess { .. } => StatusCode::BAD_GATEWAY,
+                horizons_core::events::Error::Redis(_)
+                | horizons_core::events::Error::Sqlx(_)
+                | horizons_core::events::Error::Reqwest(_)
+                | horizons_core::events::Error::Backend(_) => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::BAD_GATEWAY,
             },
         }
     }

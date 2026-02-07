@@ -1,6 +1,4 @@
-use crate::context_refresh::models::{
-    ContextEntity, RefreshRun, RefreshTrigger, SourceConfig, SyncCursor,
-};
+use crate::context_refresh::models::{ContextEntity, RefreshRun, RefreshTrigger, SourceConfig, SyncCursor};
 use crate::models::{AgentIdentity, OrgId};
 use crate::onboard::traits::{CentralDb, ProjectDb};
 use crate::{Error, Result};
@@ -10,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// A raw record pulled from an external source (connector-defined payload).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawRecord {
     /// Stable identifier in the external system.
     pub source_id: String,

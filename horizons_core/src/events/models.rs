@@ -149,14 +149,21 @@ impl Subscription {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SubscriptionHandler {
     Webhook {
         url: String,
         headers: Vec<(String, String)>,
         /// Request timeout override for this subscription.
         timeout_ms: Option<u64>,
+    },
+    /// Execute a managed operation by ID (resolved via CentralDb-backed registry).
+    Operation {
+        operation_id: String,
+        /// Optional environment override (e.g. "staging", "prod").
+        #[serde(default)]
+        environment: Option<String>,
     },
     InternalQueue {
         queue_name: String,
@@ -167,10 +174,123 @@ pub enum SubscriptionHandler {
     },
 }
 
+// Backward-compatible deserialization: accept both the new tagged representation
+// (`{"type":"webhook", ...}`) and the legacy externally-tagged representation
+// (`{"webhook": {...}}`), which older SDKs used.
+impl<'de> Deserialize<'de> for SubscriptionHandler {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v: serde_json::Value = Deserialize::deserialize(deserializer)?;
+
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Tagged {
+            Webhook {
+                url: String,
+                #[serde(default)]
+                headers: Vec<(String, String)>,
+                #[serde(default)]
+                timeout_ms: Option<u64>,
+            },
+            Operation {
+                operation_id: String,
+                #[serde(default)]
+                environment: Option<String>,
+            },
+            InternalQueue {
+                queue_name: String,
+            },
+            Callback {
+                handler_id: String,
+            },
+        }
+
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum External {
+            Webhook {
+                url: String,
+                #[serde(default)]
+                headers: Vec<(String, String)>,
+                #[serde(default)]
+                timeout_ms: Option<u64>,
+            },
+            Operation {
+                operation_id: String,
+                #[serde(default)]
+                environment: Option<String>,
+            },
+            InternalQueue {
+                queue_name: String,
+            },
+            Callback {
+                handler_id: String,
+            },
+        }
+
+        if let Ok(tagged) = serde_json::from_value::<Tagged>(v.clone()) {
+            return Ok(match tagged {
+                Tagged::Webhook {
+                    url,
+                    headers,
+                    timeout_ms,
+                } => SubscriptionHandler::Webhook {
+                    url,
+                    headers,
+                    timeout_ms,
+                },
+                Tagged::Operation {
+                    operation_id,
+                    environment,
+                } => SubscriptionHandler::Operation {
+                    operation_id,
+                    environment,
+                },
+                Tagged::InternalQueue { queue_name } => {
+                    SubscriptionHandler::InternalQueue { queue_name }
+                }
+                Tagged::Callback { handler_id } => SubscriptionHandler::Callback { handler_id },
+            });
+        }
+
+        if let Ok(ext) = serde_json::from_value::<External>(v) {
+            return Ok(match ext {
+                External::Webhook {
+                    url,
+                    headers,
+                    timeout_ms,
+                } => SubscriptionHandler::Webhook {
+                    url,
+                    headers,
+                    timeout_ms,
+                },
+                External::Operation {
+                    operation_id,
+                    environment,
+                } => SubscriptionHandler::Operation {
+                    operation_id,
+                    environment,
+                },
+                External::InternalQueue { queue_name } => {
+                    SubscriptionHandler::InternalQueue { queue_name }
+                }
+                External::Callback { handler_id } => SubscriptionHandler::Callback { handler_id },
+            });
+        }
+
+        Err(serde::de::Error::custom(
+            "invalid subscription handler (expected tagged or externally-tagged enum)",
+        ))
+    }
+}
+
 impl SubscriptionHandler {
     fn is_valid(&self) -> bool {
         match self {
             Self::Webhook { url, .. } => !url.trim().is_empty(),
+            Self::Operation { operation_id, .. } => !operation_id.trim().is_empty(),
             Self::InternalQueue { queue_name } => !queue_name.trim().is_empty(),
             Self::Callback { handler_id } => !handler_id.trim().is_empty(),
         }
@@ -216,7 +336,7 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventQuery {
     pub org_id: String,
     pub project_id: Option<String>,

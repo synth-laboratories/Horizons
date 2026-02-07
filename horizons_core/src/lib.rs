@@ -18,12 +18,12 @@ pub mod pipelines;
 
 pub use context_refresh::models::{
     ContextEntity, CronSchedule, EventTriggerConfig, RefreshRun, RefreshRunQuery, RefreshRunStatus,
-    RefreshTrigger, SourceConfig, SyncCursor,
+    RefreshTrigger, SourceConfig, SourceProcessorSpec, SyncCursor,
 };
 pub use context_refresh::traits::{Connector, ContextRefresh};
 pub use core_agents::models::{
-    ActionProposal, ActionStatus, AgentContext, AgentRunResult, AgentSchedule, AgentSpec,
-    ReviewMode, ReviewPolicy, RiskLevel,
+    ActionProposal, ActionStatus, AgentContext, AgentOutcome, AgentRunResult, AgentSchedule,
+    AgentSpec, ReviewMode, ReviewPolicy, RiskLevel,
 };
 pub use core_agents::traits::{
     ActionApprover, AgentSpec as AgentSpecTrait, CoreAgents, ReviewDecision,
@@ -36,8 +36,9 @@ pub use o11y::traits::{
 };
 pub use onboard::traits::{
     AuditQuery, BytesStream, Cache, CentralDb, ConnectorCredential, Filestore, GraphStore,
-    ListQuery, OrgRecord, ProjectDb, ProjectDbParam, ProjectDbRow, ProjectDbValue, SyncState,
-    SyncStateKey, UserRecord, UserRole, VectorMatch, VectorStore, ensure_handle_org,
+    ListQuery, OrgRecord, ProjectDb, ProjectDbParam, ProjectDbRow, ProjectDbRowExt, ProjectDbValue,
+    SyncState, SyncStateKey, UserRecord, UserRole, VectorMatch, VectorStore, ensure_handle_org,
+    project_db_migrate,
 };
 
 #[cfg(feature = "evaluation")]

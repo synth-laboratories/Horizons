@@ -67,26 +67,36 @@ pub fn deny(
 }
 
 #[tracing::instrument(level = "debug")]
-pub fn mark_executed(
+pub fn mark_dispatched(
     mut proposal: ActionProposal,
     execution_result: serde_json::Value,
     now: DateTime<Utc>,
 ) -> Result<ActionProposal> {
     if proposal.status != ActionStatus::Approved {
         return Err(Error::Conflict(format!(
-            "cannot execute action in status {:?}",
+            "cannot dispatch action in status {:?}",
             proposal.status
         )));
     }
     ensure_not_expired(&proposal, now)?;
-    proposal.status = ActionStatus::Executed;
+    proposal.status = ActionStatus::Dispatched;
     proposal.execution_result = Some(execution_result);
     Ok(proposal)
 }
 
+#[deprecated(note = "use mark_dispatched (\"executed\" was renamed to \"dispatched\")")]
+#[tracing::instrument(level = "debug")]
+pub fn mark_executed(
+    proposal: ActionProposal,
+    execution_result: serde_json::Value,
+    now: DateTime<Utc>,
+) -> Result<ActionProposal> {
+    mark_dispatched(proposal, execution_result, now)
+}
+
 #[tracing::instrument(level = "debug")]
 pub fn mark_expired(mut proposal: ActionProposal, now: DateTime<Utc>) -> ActionProposal {
-    if proposal.status == ActionStatus::Executed
+    if proposal.status == ActionStatus::Dispatched
         || proposal.status == ActionStatus::Denied
         || proposal.status == ActionStatus::Expired
     {

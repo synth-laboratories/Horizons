@@ -8,20 +8,52 @@ export interface ProjectDbHandle {
 }
 
 export type EventDirection = "inbound" | "outbound";
-export type EventStatus = "pending" | "processing" | "succeeded" | "failed";
+export type EventStatus = "pending" | "processing" | "delivered" | "failed" | "dead_lettered";
 
 export interface Event {
-  event_id: string;
+  id: string;
   org_id: string;
   project_id?: string;
+  timestamp: string;
+  received_at: string;
   topic: string;
   source: string;
   direction: EventDirection;
   payload: unknown;
   dedupe_key: string;
-  metadata?: Record<string, unknown>;
   status: EventStatus;
-  created_at: string;
+  retry_count: number;
+  metadata: Record<string, unknown>;
+  last_attempt_at?: string | null;
+}
+
+export interface CircuitBreakerConfig {
+  failure_threshold: number;
+  open_duration_ms: number;
+  success_threshold: number;
+}
+
+export interface SubscriptionConfig {
+  max_retries: number;
+  retry_backoff_base_ms: number;
+  retry_backoff_max_ms: number;
+  circuit_breaker: CircuitBreakerConfig;
+}
+
+export type SubscriptionHandler =
+  | { type: "webhook"; url: string; headers: [string, string][]; timeout_ms?: number | null }
+  | { type: "operation"; operation_id: string; environment?: string | null }
+  | { type: "internal_queue"; queue_name: string }
+  | { type: "callback"; handler_id: string };
+
+export interface Subscription {
+  id: string;
+  org_id: string;
+  topic_pattern: string;
+  direction: EventDirection;
+  handler: SubscriptionHandler;
+  config: SubscriptionConfig;
+  filter?: Record<string, unknown> | null;
 }
 
 export interface AgentRunResult {
@@ -35,7 +67,14 @@ export interface AgentRunResult {
 }
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
-export type ActionStatus = "proposed" | "approved" | "denied" | "executed" | "expired";
+export type ActionStatus =
+  | "proposed"
+  | "approved"
+  | "denied"
+  | "dispatched"
+  // Legacy name (server previously returned "executed" for "dispatched").
+  | "executed"
+  | "expired";
 
 export interface ActionProposal {
   id: UUID;

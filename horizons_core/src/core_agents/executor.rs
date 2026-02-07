@@ -1,4 +1,5 @@
 use crate::core_agents::approvals as approval_sm;
+use crate::core_agents::mcp::McpScopeProvider;
 use crate::core_agents::models::{
     ActionProposal, ActionStatus, AgentContext, AgentRunResult, ReviewMode, ReviewPolicy, RiskLevel,
 };
@@ -7,6 +8,7 @@ use crate::core_agents::traits::{ActionApprover, AgentSpec, CoreAgents, ReviewDe
 use crate::events::models::{Event, EventDirection};
 use crate::events::traits::EventBus;
 use crate::models::{AgentIdentity, AuditEntry, OrgId, ProjectDbHandle, ProjectId};
+use crate::onboard::secrets::CredentialManager;
 use crate::onboard::traits::{
     CentralDb, ProjectDb, ProjectDbParam, ProjectDbRow, ProjectDbValue, ensure_handle_org,
 };
@@ -54,6 +56,8 @@ pub struct CoreAgentsExecutor {
     policy_store: PolicyStore,
     ai_approver: Option<Arc<dyn ActionApprover>>,
     agents: Arc<RwLock<HashMap<String, Arc<dyn AgentSpec>>>>,
+    credential_manager: Option<Arc<CredentialManager>>,
+    mcp_scope_provider: Option<Arc<dyn McpScopeProvider>>,
 }
 
 impl CoreAgentsExecutor {
@@ -72,7 +76,21 @@ impl CoreAgentsExecutor {
             policy_store,
             ai_approver,
             agents: Arc::new(RwLock::new(HashMap::new())),
+            credential_manager: None,
+            mcp_scope_provider: None,
         }
+    }
+
+    /// Set the credential manager for injecting credentials into `AgentContext`.
+    pub fn with_credential_manager(mut self, cm: Arc<CredentialManager>) -> Self {
+        self.credential_manager = Some(cm);
+        self
+    }
+
+    /// Set the MCP scope provider used for `ReviewMode::McpAuth` gates.
+    pub fn with_mcp_scope_provider(mut self, p: Arc<dyn McpScopeProvider>) -> Self {
+        self.mcp_scope_provider = Some(p);
+        self
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -366,6 +384,93 @@ SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
     async fn audit(&self, entry: AuditEntry) -> Result<()> {
         self.central_db.append_audit_entry(&entry).await
     }
+
+    /// Enforce `ReviewMode::McpAuth` as a real gate.
+    ///
+    /// Fail closed if:
+    /// - the policy does not specify required MCP scopes
+    /// - no scope provider is configured
+    /// - the effective principal lacks required scopes
+    ///
+    /// Always emits an audit entry describing the check and outcome.
+    #[tracing::instrument(level = "info", skip_all)]
+    async fn enforce_mcp_auth_gate(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        project_db: &ProjectDbHandle,
+        proposal: &ActionProposal,
+        identity: &AgentIdentity,
+    ) -> Result<()> {
+        let (_mode, policy) = self
+            .policy_store
+            .get_policy(org_id, project_db, &proposal.action_type, proposal.risk_level)
+            .await?;
+
+        let required_scopes = policy.mcp_scopes.clone().unwrap_or_default();
+
+        let mut available_scopes: Vec<String> = Vec::new();
+        let mut missing_scopes: Vec<String> = Vec::new();
+
+        let failure_reason: Option<String> = if required_scopes.is_empty() {
+            Some("mcp_auth policy missing required mcp_scopes".to_string())
+        } else {
+            match &self.mcp_scope_provider {
+                None => {
+                    missing_scopes = required_scopes.clone();
+                    Some("mcp_auth scope provider not configured".to_string())
+                }
+                Some(provider) => {
+                    available_scopes = provider.scopes_for(identity).await?;
+                    missing_scopes = required_scopes
+                        .iter()
+                        .filter(|r| !available_scopes.iter().any(|a| a == *r))
+                        .cloned()
+                        .collect();
+                    if missing_scopes.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "missing required mcp scopes: {}",
+                            missing_scopes.join(", ")
+                        ))
+                    }
+                }
+            }
+        };
+
+        let now = Utc::now();
+        let (outcome, details) = match &failure_reason {
+            None => ("ok", None),
+            Some(s) => ("denied", Some(s.as_str())),
+        };
+
+        self.audit(AuditEntry {
+            id: Uuid::new_v4(),
+            org_id,
+            project_id: Some(project_id),
+            actor: identity.clone(),
+            action: "core_agents.action.mcp_auth.gate".to_string(),
+            payload: serde_json::json!({
+                "action_id": proposal.id,
+                "action_type": proposal.action_type,
+                "risk_level": proposal.risk_level,
+                "policy_review_mode": policy.review_mode,
+                "required_scopes": required_scopes,
+                "available_scopes": available_scopes,
+                "missing_scopes": missing_scopes,
+                "details": details,
+            }),
+            outcome: outcome.to_string(),
+            created_at: now,
+        })
+        .await?;
+
+        match failure_reason {
+            None => Ok(()),
+            Some(s) => Err(Error::Unauthorized(s)),
+        }
+    }
 }
 
 #[async_trait]
@@ -410,18 +515,43 @@ impl CoreAgents for CoreAgentsExecutor {
         };
 
         let started_at = Utc::now();
+
+        // Inject decrypted credentials if a CredentialManager is configured.
+        let credentials = match &self.credential_manager {
+            Some(cm) => {
+                let ids = cm.list_connector_ids(org_id).await.unwrap_or_default();
+                let mut map = serde_json::Map::new();
+                for id in ids {
+                    if let Ok(Some(v)) = cm.retrieve(org_id, &id).await {
+                        map.insert(id, v);
+                    }
+                }
+                if map.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Object(map))
+                }
+            }
+            None => None,
+        };
+
         let ctx = AgentContext {
             org_id,
             project_id,
             identity: identity.clone(),
             project_db: project_db.clone(),
+            db: self.project_db.clone(),
+            credentials,
         };
 
-        let proposals = agent.run(ctx, inputs).await?;
+        let outcome = agent.run(ctx, inputs).await?;
+        let proposals = outcome.proposals();
 
         let mut proposed_action_ids = Vec::with_capacity(proposals.len());
         for p in proposals {
-            let id = self.propose_action(p, identity).await?;
+            let id = self
+                .propose_action(org_id, project_id, &project_db, p, identity)
+                .await?;
             proposed_action_ids.push(id);
         }
 
@@ -454,14 +584,27 @@ impl CoreAgents for CoreAgentsExecutor {
     #[tracing::instrument(level = "info", skip_all)]
     async fn propose_action(
         &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        project_db: &ProjectDbHandle,
         mut proposal: ActionProposal,
         identity: &AgentIdentity,
     ) -> Result<Uuid> {
+        ensure_handle_org(project_db, org_id)?;
+        if project_db.project_id != project_id {
+            return Err(Error::InvalidInput("project_id mismatch".to_string()));
+        }
+        if proposal.org_id != org_id || proposal.project_id != project_id {
+            return Err(Error::InvalidInput(
+                "proposal org_id/project_id mismatch".to_string(),
+            ));
+        }
+
         // Determine policy and set TTL accordingly.
         let (mode, policy) = self
             .resolve_policy(
-                proposal.org_id,
-                &proposal_project_db_handle(&proposal)?,
+                org_id,
+                project_db,
                 &proposal.action_type,
                 proposal.risk_level,
             )
@@ -472,9 +615,8 @@ impl CoreAgents for CoreAgentsExecutor {
             proposal.created_at + chrono::Duration::seconds(policy.ttl_seconds as i64);
 
         // Persist proposed action.
-        let project_db = proposal_project_db_handle(&proposal)?;
         let (stored, stored_mode, inserted) = self
-            .insert_action(proposal.org_id, &project_db, &proposal, mode)
+            .insert_action(org_id, project_db, &proposal, mode)
             .await?;
 
         // If this is an idempotent duplicate, return the existing proposal ID and do not
@@ -499,12 +641,15 @@ impl CoreAgents for CoreAgentsExecutor {
         match stored_mode {
             ReviewMode::Auto => {
                 // Auto-approve and execute immediately.
+                let auto_identity = AgentIdentity::System {
+                    name: "core_agents:auto".to_string(),
+                };
                 self.approve(
-                    stored.org_id,
-                    stored.project_id,
-                    &project_db,
+                    org_id,
+                    project_id,
+                    project_db,
                     stored.id,
-                    "auto",
+                    &auto_identity,
                     "auto-approved",
                 )
                 .await?;
@@ -515,33 +660,59 @@ impl CoreAgents for CoreAgentsExecutor {
                     return Ok(stored.id);
                 };
                 let decision = approver.review(&policy, &stored, identity).await?;
+                let ai_identity = AgentIdentity::System {
+                    name: format!("ai_approver:{}", approver.name()),
+                };
                 match decision {
                     ReviewDecision::Approved { reason } => {
                         self.approve(
-                            stored.org_id,
-                            stored.project_id,
-                            &project_db,
+                            org_id,
+                            project_id,
+                            project_db,
                             stored.id,
-                            approver.name(),
+                            &ai_identity,
                             &reason,
                         )
                         .await?;
                     }
                     ReviewDecision::Denied { reason } => {
                         self.deny(
-                            stored.org_id,
-                            stored.project_id,
-                            &project_db,
+                            org_id,
+                            project_id,
+                            project_db,
                             stored.id,
-                            approver.name(),
+                            &ai_identity,
                             &reason,
                         )
                         .await?;
                     }
                 }
             }
-            ReviewMode::Human | ReviewMode::McpAuth => {
+            ReviewMode::Human => {
                 // Pending until explicit approval/denial.
+            }
+            ReviewMode::McpAuth => {
+                // MCP auth gate: automatically dispatch if the effective principal
+                // has the required MCP scopes; otherwise fail closed and deny.
+                match self
+                    .approve(
+                        org_id,
+                        project_id,
+                        project_db,
+                        stored.id,
+                        identity,
+                        "mcp_auth gate",
+                    )
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(Error::Unauthorized(msg)) => {
+                        let r = format!("mcp_auth denied: {msg}");
+                        self.deny(org_id, project_id, project_db, stored.id, identity, &r)
+                            .await?;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
 
@@ -555,7 +726,7 @@ impl CoreAgents for CoreAgentsExecutor {
         project_id: ProjectId,
         project_db: &ProjectDbHandle,
         action_id: Uuid,
-        approver_id: &str,
+        identity: &AgentIdentity,
         reason: &str,
     ) -> Result<()> {
         ensure_handle_org(project_db, org_id)?;
@@ -563,33 +734,46 @@ impl CoreAgents for CoreAgentsExecutor {
             return Err(Error::InvalidInput("project_id mismatch".to_string()));
         }
 
-        let Some((p0, _mode)) = self.get_action(org_id, project_db, action_id).await? else {
+        let Some((p0, mode)) = self.get_action(org_id, project_db, action_id).await? else {
             return Err(Error::NotFound(format!("action not found: {action_id}")));
         };
         if p0.project_id != project_id {
             return Err(Error::Unauthorized("action project mismatch".to_string()));
         }
 
+        if mode == ReviewMode::McpAuth {
+            self.enforce_mcp_auth_gate(org_id, project_id, project_db, &p0, identity)
+                .await?;
+        }
+
+        let approver_id = identity_to_actor_id(identity);
         let now = Utc::now();
-        let mut p = approval_sm::approve(p0, approver_id, reason, now)?;
+        let mut p = approval_sm::approve(p0, &approver_id, reason, now)?;
         self.update_action(org_id, project_db, &p).await?;
 
-        // "Execute" means routing outward via Event Sync.
+        // Near-term semantics:
+        // "Dispatched" means "published an outbound event via the Event Sync layer".
+        // Delivery confirmation is not yet tracked end-to-end.
         let topic = format!("action.{}.approved", p.action_type);
         let event_id = self
             .publish_action_event(&p, &topic, "approved", Some(reason))
             .await?;
 
-        p = approval_sm::mark_executed(p, serde_json::json!({ "event_id": event_id }), Utc::now())?;
+        p = approval_sm::mark_dispatched(
+            p,
+            serde_json::json!({
+                "dispatch_event_id": event_id,
+                "dispatch_kind": "event_sync",
+            }),
+            Utc::now(),
+        )?;
         self.update_action(org_id, project_db, &p).await?;
 
         self.audit(AuditEntry {
             id: Uuid::new_v4(),
             org_id,
             project_id: Some(project_id),
-            actor: AgentIdentity::System {
-                name: "core_agents".to_string(),
-            },
+            actor: identity.clone(),
             action: "core_agents.action.approved".to_string(),
             payload: serde_json::to_value(&p)
                 .map_err(|e| Error::backend("serialize approved action", e))?,
@@ -608,7 +792,7 @@ impl CoreAgents for CoreAgentsExecutor {
         project_id: ProjectId,
         project_db: &ProjectDbHandle,
         action_id: Uuid,
-        approver_id: &str,
+        identity: &AgentIdentity,
         reason: &str,
     ) -> Result<()> {
         ensure_handle_org(project_db, org_id)?;
@@ -623,8 +807,9 @@ impl CoreAgents for CoreAgentsExecutor {
             return Err(Error::Unauthorized("action project mismatch".to_string()));
         }
 
+        let approver_id = identity_to_actor_id(identity);
         let now = Utc::now();
-        let p = approval_sm::deny(p0, approver_id, reason, now)?;
+        let p = approval_sm::deny(p0, &approver_id, reason, now)?;
         self.update_action(org_id, project_db, &p).await?;
 
         let topic = format!("action.{}.denied", p.action_type);
@@ -636,9 +821,7 @@ impl CoreAgents for CoreAgentsExecutor {
             id: Uuid::new_v4(),
             org_id,
             project_id: Some(project_id),
-            actor: AgentIdentity::System {
-                name: "core_agents".to_string(),
-            },
+            actor: identity.clone(),
             action: "core_agents.action.denied".to_string(),
             payload: serde_json::to_value(&p)
                 .map_err(|e| Error::backend("serialize denied action", e))?,
@@ -745,33 +928,6 @@ SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
             .get_policy(org_id, project_db, action_type, risk)
             .await
     }
-}
-
-fn proposal_project_db_handle(p: &ActionProposal) -> Result<ProjectDbHandle> {
-    // Phase D2 assumes the caller provides a valid handle. The executor uses the handle passed into
-    // run()/approve()/deny()/list_pending(). For propose_action() we require the proposal to carry
-    // the handle's org/project IDs only, not the connection itself.
-    //
-    // In practice, propose_action() is called from `run()` where the handle exists; we persist the
-    // handle in context and pass it in through the proposal in `context_json` if desired.
-    //
-    // For v0.0.x we store actions in the *current* project DB handle via the API surface; therefore
-    // propose_action() requires the project DB handle to be embedded by the caller using `context`.
-    let h = p
-        .context
-        .get("_project_db_handle")
-        .cloned()
-        .ok_or_else(|| {
-            Error::InvalidInput("proposal.context missing _project_db_handle".to_string())
-        })?;
-    let handle: ProjectDbHandle = serde_json::from_value(h)
-        .map_err(|e| Error::backend("deserialize _project_db_handle", e))?;
-    if handle.org_id != p.org_id || handle.project_id != p.project_id {
-        return Err(Error::InvalidInput(
-            "_project_db_handle org/project mismatch".to_string(),
-        ));
-    }
-    Ok(handle)
 }
 
 fn get_string(row: &ProjectDbRow, col: &str) -> Result<String> {
@@ -884,12 +1040,20 @@ fn mode_from_str(s: &str) -> Result<ReviewMode> {
     crate::core_agents::policies::mode_from_str(s)
 }
 
+fn identity_to_actor_id(identity: &AgentIdentity) -> String {
+    match identity {
+        AgentIdentity::User { user_id, .. } => user_id.to_string(),
+        AgentIdentity::Agent { agent_id } => agent_id.clone(),
+        AgentIdentity::System { name } => format!("system:{name}"),
+    }
+}
+
 fn status_to_str(s: ActionStatus) -> &'static str {
     match s {
         ActionStatus::Proposed => "proposed",
         ActionStatus::Approved => "approved",
         ActionStatus::Denied => "denied",
-        ActionStatus::Executed => "executed",
+        ActionStatus::Dispatched => "dispatched",
         ActionStatus::Expired => "expired",
     }
 }
@@ -899,7 +1063,9 @@ fn status_from_str(s: &str) -> Result<ActionStatus> {
         "proposed" => Ok(ActionStatus::Proposed),
         "approved" => Ok(ActionStatus::Approved),
         "denied" => Ok(ActionStatus::Denied),
-        "executed" => Ok(ActionStatus::Executed),
+        "dispatched" => Ok(ActionStatus::Dispatched),
+        // Backwards compat: older rows used "executed" for "dispatched".
+        "executed" => Ok(ActionStatus::Dispatched),
         "expired" => Ok(ActionStatus::Expired),
         other => Err(Error::InvalidInput(format!(
             "unknown action status: {other}"

@@ -4,5 +4,7 @@ pub mod models;
 pub mod postgres;
 pub mod redis;
 pub mod s3;
+pub mod secrets;
+pub mod sqlite;
 pub mod traits;
 pub mod turso;

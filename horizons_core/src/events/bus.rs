@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use super::config::EventSyncConfig;
 use super::dlq::DeadLetterQueue;
 use super::models::{Event, EventQuery, EventStatus, Subscription};
+use super::operations::OperationExecutor;
 use super::router::{EventRouter, EventRouterHandle};
 use super::store::PgEventStore;
 use super::traits::EventBus;
@@ -21,7 +22,10 @@ pub struct RedisEventBus {
 
 impl RedisEventBus {
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn connect(cfg: EventSyncConfig) -> Result<Self> {
+    pub async fn connect(
+        cfg: EventSyncConfig,
+        operation_executor: Option<Arc<dyn OperationExecutor>>,
+    ) -> Result<Self> {
         cfg.validate()?;
 
         let store = Arc::new(PgEventStore::connect(&cfg.postgres_url).await?);
@@ -37,7 +41,14 @@ impl RedisEventBus {
             store.clone(),
             redis_client.clone(),
             dlq.clone(),
+            operation_executor,
         );
+
+        // Hydrate router subscriptions from durable storage.
+        // This is best-effort: if decoding fails, we error early rather than silently dropping subs.
+        for sub in store.list_all_subscriptions().await? {
+            router.router().upsert_subscription(sub);
+        }
 
         Ok(Self {
             cfg,
@@ -109,14 +120,39 @@ impl EventBus for RedisEventBus {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn subscribe(&self, sub: Subscription) -> Result<String> {
+        // Persist first (source of truth), then update local router.
+        self.store.upsert_subscription(&sub).await?;
         self.router.router().upsert_subscription(sub.clone());
         self.router.router().wake_org(&sub.org_id).await;
+
+        // Notify other instances to reload org subscriptions.
+        let channel = format!("horizons_subscriptions:{}", &sub.org_id);
+        {
+            let mut conn = self.publisher.lock().await;
+            let _ = redis::cmd("PUBLISH")
+                .arg(&channel)
+                .arg(&sub.id)
+                .query_async::<()>(&mut *conn)
+                .await;
+        }
         Ok(sub.id)
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn unsubscribe(&self, org_id: &str, sub_id: &str) -> Result<()> {
+        self.store.delete_subscription(org_id, sub_id).await?;
         self.router.router().remove_subscription(org_id, sub_id);
+
+        // Notify other instances to reload org subscriptions.
+        let channel = format!("horizons_subscriptions:{org_id}");
+        {
+            let mut conn = self.publisher.lock().await;
+            let _ = redis::cmd("PUBLISH")
+                .arg(&channel)
+                .arg(sub_id)
+                .query_async::<()>(&mut *conn)
+                .await;
+        }
         Ok(())
     }
 
@@ -154,5 +190,10 @@ impl EventBus for RedisEventBus {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn query(&self, filter: EventQuery) -> Result<Vec<Event>> {
         self.store.query(&filter).await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_subscriptions(&self, org_id: &str) -> Result<Vec<Subscription>> {
+        self.store.list_subscriptions(org_id).await
     }
 }

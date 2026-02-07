@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------
+# Example: production values for Horizons Helm chart
+#
+# Usage:
+#   helm install horizons ./charts/horizons -f charts/horizons/ci/prod-values.yaml
+# ---------------------------------------------------------------
+
+server:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/synth-laboratories/horizons
+    tag: "0.1.0"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# -- External Postgres (e.g. AWS RDS with pgvector)
+externalPostgres:
+  url: "postgresql://horizons:CHANGE_ME@your-rds-host.region.rds.amazonaws.com:5432/horizons"
+
+# -- External Redis (e.g. AWS ElastiCache)
+externalRedis:
+  url: "redis://:CHANGE_ME@your-elasticache-host.region.cache.amazonaws.com:6379"
+
+# -- In-cluster instances disabled (using external)
+postgres:
+  enabled: false
+redis:
+  enabled: false
+
+# -- Secrets
+secrets:
+  # Generate a 32-byte key: openssl rand -base64 32
+  masterKey: "CHANGE_ME_base64_32_bytes"
+
+# -- Object storage for filestore
+objectStorage:
+  bucket: "horizons-prod-artifacts"
+  region: "us-east-1"
+
+# -- Ingress
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+  hosts:
+    - host: horizons.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: horizons-tls
+      hosts:
+        - horizons.example.com
+
+# -- Autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
+
+# -- Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# -- Network Policy
+networkPolicy:
+  enabled: true
+
+# -- Migrations
+migrations:
+  enabled: true

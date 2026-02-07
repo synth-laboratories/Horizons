@@ -150,13 +150,15 @@ fn verify_signature_if_configured(
         return Ok(());
     };
 
-    let Some(sig) = headers.get("x-horizons-signature") else {
-        return Err(Error::SignatureVerificationFailed);
-    };
-    let sig = sig
-        .to_str()
-        .map_err(|_| Error::SignatureVerificationFailed)?
-        .trim();
+    verify_signature_from_headers(secret, headers, body)
+}
+
+/// Verify a Horizons inbound webhook signature.
+///
+/// Accepts `x-horizons-signature` in either raw hex or `sha256=<hex>` format.
+#[tracing::instrument(level = "debug", skip(body))]
+pub fn verify_horizons_signature(secret: &str, signature_header: &str, body: &[u8]) -> Result<()> {
+    let sig = signature_header.trim();
 
     // We accept both raw hex and "sha256=<hex>" formats.
     let sig_hex = sig.strip_prefix("sha256=").unwrap_or(sig);
@@ -170,6 +172,18 @@ fn verify_signature_if_configured(
         .map_err(|_| Error::SignatureVerificationFailed)?;
 
     Ok(())
+}
+
+/// Verify a signature using the standard Horizons header name.
+#[tracing::instrument(level = "debug", skip(body))]
+pub fn verify_signature_from_headers(secret: &str, headers: &HeaderMap, body: &[u8]) -> Result<()> {
+    let Some(sig) = headers.get("x-horizons-signature") else {
+        return Err(Error::SignatureVerificationFailed);
+    };
+    let sig = sig
+        .to_str()
+        .map_err(|_| Error::SignatureVerificationFailed)?;
+    verify_horizons_signature(secret, sig, body)
 }
 
 #[derive(Debug, Clone)]

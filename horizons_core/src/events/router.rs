@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use super::config::EventSyncConfig;
 use super::dlq::DeadLetterQueue;
 use super::models::{Event, EventStatus, Subscription, SubscriptionHandler};
+use super::operations::OperationExecutor;
 use super::store::PgEventStore;
 use super::webhook::WebhookSender;
 use super::{Error, Result};
@@ -43,6 +44,7 @@ pub struct EventRouter {
     store: Arc<PgEventStore>,
     dlq: DeadLetterQueue,
     webhook_sender: WebhookSender,
+    operation_executor: Option<Arc<dyn OperationExecutor>>,
     redis: redis::Client,
 
     subscriptions: Arc<DashMap<String, Vec<Subscription>>>, // org_id -> subs
@@ -65,6 +67,7 @@ impl EventRouter {
         store: Arc<PgEventStore>,
         redis: redis::Client,
         dlq: DeadLetterQueue,
+        operation_executor: Option<Arc<dyn OperationExecutor>>,
     ) -> EventRouterHandle {
         let (wake_tx, wake_rx) = mpsc::channel::<String>(1024);
         let webhook_sender =
@@ -75,6 +78,7 @@ impl EventRouter {
             store,
             dlq,
             webhook_sender,
+            operation_executor,
             redis,
             subscriptions: Arc::new(DashMap::new()),
             callbacks: Arc::new(DashMap::new()),
@@ -137,11 +141,27 @@ impl EventRouter {
                         tokio::time::sleep(Duration::from_millis(1_000)).await;
                         continue;
                     }
+                    if let Err(err) = pubsub.psubscribe("horizons_subscriptions:*").await {
+                        tracing::warn!(error = %err, "redis psubscribe failed (subscriptions)");
+                        tokio::time::sleep(Duration::from_millis(1_000)).await;
+                        continue;
+                    }
 
                     let mut stream = pubsub.on_message();
                     while let Some(msg) = stream.next().await {
                         let channel = msg.get_channel_name();
                         if let Some(org_id) = channel.strip_prefix("horizons_events:") {
+                            self.wake_org(org_id).await;
+                        } else if let Some(org_id) = channel.strip_prefix("horizons_subscriptions:")
+                        {
+                            // Reload subscriptions (best-effort) and then wake the org to process any pending events.
+                            if let Err(err) = self.reload_subscriptions_for_org(org_id).await {
+                                tracing::warn!(
+                                    org_id = %org_id,
+                                    error = %err,
+                                    "failed reloading subscriptions"
+                                );
+                            }
                             self.wake_org(org_id).await;
                         }
                     }
@@ -153,6 +173,17 @@ impl EventRouter {
                 }
             }
         }
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reload_subscriptions_for_org(&self, org_id: &str) -> Result<()> {
+        let subs = self.store.list_subscriptions(org_id).await?;
+        if subs.is_empty() {
+            self.subscriptions.remove(org_id);
+        } else {
+            self.subscriptions.insert(org_id.to_string(), subs);
+        }
+        Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -304,6 +335,20 @@ impl EventRouter {
                 let res: Result<()> = self
                     .webhook_sender
                     .send(url, headers, *timeout_ms, event)
+                    .await;
+                self.record_delivery_result(&key, res.as_ref().err(), &sub.config.circuit_breaker);
+                res
+            }
+            SubscriptionHandler::Operation {
+                operation_id,
+                environment,
+            } => {
+                let key = breaker_key(&event.org_id, &sub.id);
+                let exec = self.operation_executor.as_ref().ok_or_else(|| {
+                    Error::message("operation executor not configured".to_string())
+                })?;
+                let res = exec
+                    .execute(&event.org_id, operation_id, environment.as_deref(), event)
                     .await;
                 self.record_delivery_result(&key, res.as_ref().err(), &sub.config.circuit_breaker);
                 res

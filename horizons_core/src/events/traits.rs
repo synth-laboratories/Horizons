@@ -24,6 +24,14 @@ pub trait EventBus: Send + Sync {
 
     /// Query events (for replay, debugging, audit).
     async fn query(&self, filter: EventQuery) -> Result<Vec<Event>>;
+
+    /// List current subscriptions for an org.
+    ///
+    /// Default implementation returns an empty list. Implementations that
+    /// persist subscriptions (e.g. Postgres-backed) should override.
+    async fn list_subscriptions(&self, _org_id: &str) -> Result<Vec<Subscription>> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]

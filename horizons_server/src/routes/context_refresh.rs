@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use chrono::Utc;
 use horizons_core::context_refresh::models::{
     CronSchedule, EventTriggerConfig, RefreshRunQuery, RefreshTrigger, SourceConfig,
+    SourceProcessorSpec,
 };
 use horizons_core::context_refresh::schedule::CronExpr;
 use horizons_core::context_refresh::traits::{RefreshResult, RefreshStatus};
@@ -49,6 +50,10 @@ pub struct RegisterSourceRequest {
     pub event_triggers: Option<Vec<EventTriggerConfig>>,
     /// Connector-specific configuration blob (auth references, filters, etc.).
     pub settings: Option<serde_json::Value>,
+    /// Optional processing layer on top of connector pull.
+    ///
+    /// Use `pipeline` to run graphs/agents/tools after pull.
+    pub processor: Option<SourceProcessorSpec>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,7 +159,7 @@ pub async fn register_source(
         }
     };
 
-    let src = SourceConfig::new(
+    let mut src = SourceConfig::new(
         org_id,
         req.project_id,
         project_db,
@@ -167,6 +172,9 @@ pub async fn register_source(
         req.settings.unwrap_or_else(|| serde_json::json!({})),
         Some(Utc::now()),
     )?;
+    if let Some(p) = req.processor {
+        src.processor = p;
+    }
     state
         .context_refresh
         .register_source(&identity, src.clone())

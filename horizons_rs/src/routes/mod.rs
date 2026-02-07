@@ -1,4 +1,5 @@
 use axum::Router;
+use axum::routing::get;
 
 pub mod actions;
 pub mod agents;
@@ -32,6 +33,7 @@ fn api_v1_router() -> Router {
     Router::new().nest(
         "/api/v1",
         Router::new()
+            .route("/health", get(health::get_health))
             .merge(projects::router())
             .merge(onboard::router())
             .merge(filestore::router())

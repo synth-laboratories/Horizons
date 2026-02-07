@@ -1,6 +1,6 @@
 use crate::admin;
 use crate::auth::CentralDbApiKeyAuth;
-use crate::extract::AuthProviderExt;
+use crate::extract::{AuthConfig, AuthConfigExt, AuthProviderExt};
 use crate::routes;
 use axum::routing::get;
 use axum::{Extension, Router};
@@ -114,17 +114,24 @@ impl AppState {
 
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn router(state: AppState) -> Router {
+    router_with_auth_config(state, AuthConfig::default())
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+pub fn router_with_auth_config(state: AppState, auth_cfg: AuthConfig) -> Router {
     let state = Arc::new(state);
-    // Provide Bearer-token auth support via `AuthenticatedIdentity` extractor.
-    // Enforcement is controlled by env vars in `extract.rs` (dev headers remain default).
+    // Provide Bearer-token auth support via `AuthenticatedIdentity`/`OrgIdHeader` extractors.
     let auth_provider =
         AuthProviderExt(Arc::new(CentralDbApiKeyAuth::new(state.central_db.clone())));
+    let auth_cfg = AuthConfigExt(auth_cfg);
+
     Router::new()
         .merge(routes::router())
         .merge(admin::router())
         .route("/health", get(routes::health::get_health))
         .layer(Extension(state))
         .layer(Extension(auth_provider))
+        .layer(Extension(auth_cfg))
         .layer(SetRequestIdLayer::new(
             axum::http::HeaderName::from_static("x-request-id"),
             MakeRequestUuid,

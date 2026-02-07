@@ -1,10 +1,14 @@
 use axum::Router;
+use axum::routing::get;
+use axum::middleware;
 
 pub mod actions;
 pub mod agents;
+pub mod assets;
 pub mod audit;
 pub mod config;
 pub mod context_refresh;
+pub mod credentials;
 pub mod engine;
 #[cfg(feature = "evaluation")]
 pub mod evaluation;
@@ -33,6 +37,7 @@ fn api_v1_router() -> Router {
     Router::new().nest(
         "/api/v1",
         Router::new()
+            .route("/health", get(health::get_health))
             .merge(projects::router())
             .merge(onboard::router())
             .merge(filestore::router())
@@ -46,7 +51,10 @@ fn api_v1_router() -> Router {
             .merge(mcp::router())
             .merge(feature_routers())
             .merge(audit::router())
-            .merge(config::router()),
+            .merge(assets::router())
+            .merge(credentials::router())
+            .merge(config::router())
+            .layer(middleware::from_fn(crate::middleware::require_auth_for_mutating)),
     )
 }
 

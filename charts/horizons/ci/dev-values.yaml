@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------
+# Example: dev / demo values — runs Postgres + Redis in-cluster
+#
+# Usage:
+#   helm install horizons-dev ./charts/horizons -f charts/horizons/ci/dev-values.yaml
+# ---------------------------------------------------------------
+
+server:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# -- Spin up Postgres + Redis inside the cluster for demos
+postgres:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi
+
+redis:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 2Gi
+
+# -- No external infra
+externalPostgres:
+  url: ""
+externalRedis:
+  url: ""
+
+# -- Persistence for dev (SQLite fallback; not needed with in-cluster PG)
+persistence:
+  enabled: false
+
+# -- Ingress off for dev — use port-forward
+ingress:
+  enabled: false
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false
+
+networkPolicy:
+  enabled: false

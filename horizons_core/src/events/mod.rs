@@ -6,6 +6,7 @@ pub mod bus;
 pub mod config;
 pub mod dlq;
 pub mod models;
+pub mod operations;
 pub mod router;
 pub mod store;
 pub mod traits;

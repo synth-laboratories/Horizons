@@ -1,0 +1,38 @@
+🚀 Horizons has been deployed!
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Version:   {{ .Chart.AppVersion }}
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+
+  URL: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+  Access the API via port-forward:
+
+    kubectl port-forward svc/{{ include "horizons.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+
+  Then open: http://localhost:{{ .Values.service.port }}/health
+{{- end }}
+
+{{- if .Values.migrations.enabled }}
+
+  Migrations run automatically as a pre-install/pre-upgrade hook.
+{{- end }}
+
+{{- if and (not (include "horizons.databaseUrl" .)) (not .Values.persistence.enabled) }}
+
+  ⚠  No DATABASE_URL configured and persistence is disabled.
+     The server is using an in-memory/ephemeral SQLite backend.
+     Data will be lost when the pod restarts!
+
+     For production, set externalPostgres.url in your values file.
+{{- end }}
+
+  Verify the deployment:
+
+    kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }} -n {{ .Release.Namespace }}
+    curl http://localhost:{{ .Values.service.port }}/health

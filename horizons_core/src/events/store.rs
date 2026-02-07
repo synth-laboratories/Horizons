@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, Row, Transaction};
 
+use super::models::Subscription;
 use super::models::{Event, EventDirection, EventQuery, EventStatus};
 use super::traits::EventStore;
 use super::{Error, Result};
@@ -97,7 +98,112 @@ impl PgEventStore {
         .execute(&self.pool)
         .await?;
 
+        // Durable subscriptions. The router keeps an in-memory copy for fast matching,
+        // but this table is the source of truth across restarts.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS event_subscriptions (
+                id         TEXT PRIMARY KEY,
+                org_id     TEXT NOT NULL,
+                sub_json   JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS event_subscriptions_org_idx
+              ON event_subscriptions (org_id);
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn upsert_subscription(&self, sub: &Subscription) -> Result<()> {
+        let sub_json = sqlx::types::Json(sub);
+        sqlx::query(
+            r#"
+            INSERT INTO event_subscriptions (id, org_id, sub_json, updated_at)
+            VALUES ($1, $2, $3::jsonb, NOW())
+            ON CONFLICT (id) DO UPDATE
+              SET sub_json = EXCLUDED.sub_json,
+                  updated_at = NOW()
+            "#,
+        )
+        .bind(&sub.id)
+        .bind(&sub.org_id)
+        .bind(sub_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn delete_subscription(&self, org_id: &str, sub_id: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM event_subscriptions
+             WHERE org_id = $1 AND id = $2
+            "#,
+        )
+        .bind(org_id)
+        .bind(sub_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn list_subscriptions(&self, org_id: &str) -> Result<Vec<Subscription>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT sub_json
+              FROM event_subscriptions
+             WHERE org_id = $1
+             ORDER BY id ASC
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let v: serde_json::Value = r.try_get("sub_json")?;
+            let sub: Subscription =
+                serde_json::from_value(v).map_err(|e| Error::backend("decode sub_json", e))?;
+            out.push(sub);
+        }
+        Ok(out)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn list_all_subscriptions(&self) -> Result<Vec<Subscription>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT sub_json
+              FROM event_subscriptions
+             ORDER BY org_id ASC, id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let v: serde_json::Value = r.try_get("sub_json")?;
+            let sub: Subscription =
+                serde_json::from_value(v).map_err(|e| Error::backend("decode sub_json", e))?;
+            out.push(sub);
+        }
+        Ok(out)
     }
 
     /// Append an event with dedupe semantics.

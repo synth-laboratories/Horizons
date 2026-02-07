@@ -1,5 +1,5 @@
 import { HorizonsClient } from "./client";
-import { Event, EventDirection, EventStatus } from "./types";
+import { Event, EventDirection, EventStatus, Subscription, SubscriptionConfig, SubscriptionHandler } from "./types";
 
 export class EventsAPI {
   constructor(private client: HorizonsClient) {}
@@ -38,5 +38,28 @@ export class EventsAPI {
     });
     const path = `/api/v1/events${search.toString() ? `?${search.toString()}` : ""}`;
     return await this.client.request<Event[]>(path, { method: "GET" });
+  }
+
+  async subscribe(input: {
+    topic_pattern: string;
+    direction: EventDirection;
+    handler: SubscriptionHandler;
+    config?: SubscriptionConfig;
+    filter?: Record<string, unknown> | null;
+  }): Promise<string> {
+    const resp = await this.client.request<{ subscription_id: string }>("/api/v1/subscriptions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    return resp.subscription_id;
+  }
+
+  async listSubscriptions(): Promise<Subscription[]> {
+    return await this.client.request<Subscription[]>("/api/v1/subscriptions", { method: "GET" });
+  }
+
+  async unsubscribe(subscription_id: string): Promise<void> {
+    await this.client.request(`/api/v1/subscriptions/${subscription_id}`, { method: "DELETE" });
   }
 }

@@ -118,6 +118,8 @@ pub enum ActionStatus {
     Proposed,
     Approved,
     Denied,
+    Dispatched,
+    #[deprecated(note = "use Dispatched (\"executed\" was renamed to \"dispatched\")")]
     Executed,
     Expired,
 }

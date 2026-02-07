@@ -1,6 +1,7 @@
 use clap::Parser;
 use horizons_server::cli::{Cli, Commands};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 #[tokio::main]
 #[tracing::instrument(level = "info")]
@@ -49,6 +50,107 @@ async fn main() -> anyhow::Result<()> {
                 let store = horizons_core::events::store::PgEventStore::connect(url).await?;
                 store.migrate().await?;
                 tracing::info!("events store migrations applied");
+            }
+        }
+        Commands::CreateApiKey {
+            data_dir,
+            org_id,
+            name,
+            scopes,
+            expires_in_days,
+            actor_user_id,
+            actor_email,
+            org_name,
+        } => {
+            use chrono::{Duration, Utc};
+            use horizons_core::models::{AgentIdentity, OrgId};
+            use horizons_core::onboard::models::{ApiKeyRecord, OrgRecord};
+            use horizons_core::onboard::traits::{CentralDb, ListQuery};
+            use ulid::Ulid;
+            use uuid::Uuid;
+
+            let central_db_url = std::env::var("DATABASE_URL")
+                .or_else(|_| std::env::var("HORIZONS_CENTRAL_DB_URL"))
+                .ok();
+
+            let central_db: Arc<dyn CentralDb> = if let Some(url) = central_db_url {
+                let cfg = horizons_core::onboard::config::PostgresConfig {
+                    url,
+                    max_connections: 5,
+                    acquire_timeout: std::time::Duration::from_secs(10),
+                };
+                let db = horizons_core::onboard::postgres::PostgresCentralDb::connect(&cfg).await?;
+                db.migrate().await?;
+                Arc::new(db)
+            } else {
+                Arc::new(
+                    horizons_core::onboard::sqlite::SqliteCentralDb::new(
+                        data_dir.join("central.db"),
+                    )
+                    .await?,
+                )
+            };
+
+            let org_id = OrgId(org_id);
+            if central_db.get_org(org_id).await?.is_none() {
+                central_db
+                    .upsert_org(&OrgRecord {
+                        org_id,
+                        name: org_name,
+                        created_at: Utc::now(),
+                    })
+                    .await?;
+            }
+
+            // Enforce (org_id, name) uniqueness with a friendlier error before DB constraints.
+            let existing = central_db
+                .list_api_keys(
+                    org_id,
+                    ListQuery {
+                        limit: 1000,
+                        offset: 0,
+                    },
+                )
+                .await?;
+            if existing.iter().any(|k| k.name == name) {
+                anyhow::bail!("api key name already exists for org: {name}");
+            }
+
+            let key_id = Uuid::new_v4();
+            let secret = format!("{}{}", Ulid::new(), Ulid::new());
+            let token = horizons_server::auth::format_api_key_token(key_id, &secret);
+            let secret_hash = horizons_server::auth::sha256_hex(secret.as_bytes());
+            let created_at = Utc::now();
+            let expires_at = expires_in_days.map(|d| created_at + Duration::days(d as i64));
+
+            let actor = match actor_user_id {
+                Some(user_id) => AgentIdentity::User {
+                    user_id,
+                    email: actor_email,
+                },
+                None => AgentIdentity::System {
+                    name: "api_key".to_string(),
+                },
+            };
+
+            let rec = ApiKeyRecord {
+                key_id,
+                org_id,
+                name,
+                actor,
+                scopes,
+                secret_hash,
+                created_at,
+                expires_at,
+                last_used_at: None,
+            };
+            central_db.upsert_api_key(&rec).await?;
+
+            println!("token: {token}");
+            println!("org_id: {}", rec.org_id);
+            println!("key_id: {}", rec.key_id);
+            if let Some(exp) = rec.expires_at {
+                println!("expires_at: {exp}");
             }
         }
         Commands::ValidateGraph { path } => {

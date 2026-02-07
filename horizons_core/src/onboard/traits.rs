@@ -9,8 +9,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub use crate::onboard::models::{
-    AuditQuery, ConnectorCredential, ListQuery, OrgRecord, ProjectDbParam, ProjectDbRow,
-    ProjectDbValue, SyncState, SyncStateKey, UserRecord, UserRole, VectorMatch,
+    ApiKeyRecord, AuditQuery, ConnectorCredential, ListQuery, OperationRecord, OperationRunRecord,
+    OrgRecord, ProjectDbParam, ProjectDbRow, ProjectDbRowExt, ProjectDbValue, ResourceRecord,
+    SyncState, SyncStateKey, UserRecord, UserRole, VectorMatch, project_db_migrate,
 };
 
 /// Stream of bytes messages (e.g. Redis pub/sub).
@@ -27,6 +28,17 @@ pub trait CentralDb: Send + Sync {
     async fn get_user(&self, org_id: OrgId, user_id: Uuid) -> Result<Option<UserRecord>>;
     async fn list_users(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<UserRecord>>;
 
+    // Authn: API keys (bearer tokens).
+    async fn upsert_api_key(&self, key: &ApiKeyRecord) -> Result<()>;
+    async fn get_api_key_by_id(&self, key_id: Uuid) -> Result<Option<ApiKeyRecord>>;
+    async fn list_api_keys(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<ApiKeyRecord>>;
+    async fn delete_api_key(&self, org_id: OrgId, key_id: Uuid) -> Result<()>;
+    async fn touch_api_key_last_used(
+        &self,
+        key_id: Uuid,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()>;
+
     async fn get_platform_config(&self, org_id: OrgId) -> Result<Option<PlatformConfig>>;
     async fn set_platform_config(&self, config: &PlatformConfig) -> Result<()>;
 
@@ -41,6 +53,36 @@ pub trait CentralDb: Send + Sync {
         connector_id: &str,
     ) -> Result<Option<ConnectorCredential>>;
     async fn delete_connector_credential(&self, org_id: OrgId, connector_id: &str) -> Result<()>;
+    async fn list_connector_credentials(&self, org_id: OrgId) -> Result<Vec<ConnectorCredential>>;
+
+    // Managed assets (Resources + Operations).
+    async fn upsert_resource(&self, resource: &ResourceRecord) -> Result<()>;
+    async fn get_resource(
+        &self,
+        org_id: OrgId,
+        resource_id: &str,
+    ) -> Result<Option<ResourceRecord>>;
+    async fn list_resources(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<ResourceRecord>>;
+
+    async fn upsert_operation(&self, operation: &OperationRecord) -> Result<()>;
+    async fn get_operation(
+        &self,
+        org_id: OrgId,
+        operation_id: &str,
+    ) -> Result<Option<OperationRecord>>;
+    async fn list_operations(
+        &self,
+        org_id: OrgId,
+        query: ListQuery,
+    ) -> Result<Vec<OperationRecord>>;
+
+    async fn append_operation_run(&self, run: &OperationRunRecord) -> Result<()>;
+    async fn list_operation_runs(
+        &self,
+        org_id: OrgId,
+        operation_id: Option<&str>,
+        query: ListQuery,
+    ) -> Result<Vec<OperationRunRecord>>;
 
     async fn upsert_sync_state(&self, state: &SyncState) -> Result<()>;
     async fn get_sync_state(&self, key: &SyncStateKey) -> Result<Option<SyncState>>;

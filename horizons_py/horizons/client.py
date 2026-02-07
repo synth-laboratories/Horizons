@@ -181,6 +181,12 @@ class HorizonsClient:
 
         return PipelinesAPI(self)
 
+    @property
+    def mcp(self):
+        from .mcp import McpAPI
+
+        return McpAPI(self)
+
     async def health(self) -> Any:
         resp = await self._request("GET", "/api/v1/health")
         return await self.json(resp)

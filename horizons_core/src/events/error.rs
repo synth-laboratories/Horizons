@@ -58,4 +58,12 @@ impl Error {
             message: message.into(),
         }
     }
+
+    #[tracing::instrument(level = "debug", skip(err))]
+    pub fn backend(
+        context: impl Into<String> + std::fmt::Debug,
+        err: impl std::fmt::Display,
+    ) -> Self {
+        Self::Backend(format!("{}: {}", context.into(), err))
+    }
 }

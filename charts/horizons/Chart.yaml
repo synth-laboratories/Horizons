@@ -1,0 +1,21 @@
+apiVersion: v2
+name: horizons
+description: >-
+  Open-source agent execution platform — event-driven agents, context refresh,
+  memory, optimization, and evaluation backed by Postgres + Redis.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/synth-laboratories/Horizons
+sources:
+  - https://github.com/synth-laboratories/Horizons
+maintainers:
+  - name: Synth Laboratories
+    url: https://github.com/synth-laboratories
+keywords:
+  - agents
+  - ai
+  - events
+  - horizons
+  - rust
+icon: https://raw.githubusercontent.com/synth-laboratories/Horizons/main/horizons_diagram_synth.png

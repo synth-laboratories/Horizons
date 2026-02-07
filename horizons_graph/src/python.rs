@@ -15,7 +15,10 @@ use crate::error::{GraphError, Result};
 /// By default this runs via a local `python3` subprocess. A Monty backend can
 /// be added behind the `monty` feature.
 pub async fn run_python(args: &Value) -> Result<Value> {
-    match selected_backend() {
+    let args_obj = args
+        .as_object()
+        .ok_or_else(|| GraphError::bad_request("python args must be an object"))?;
+    match selected_backend(args_obj) {
         PythonBackend::Subprocess => run_python_subprocess(args).await,
         PythonBackend::Monty => {
             #[cfg(feature = "monty")]
@@ -99,7 +102,22 @@ enum PythonBackend {
     Monty,
 }
 
-fn selected_backend() -> PythonBackend {
+fn selected_backend(args_obj: &Map<String, Value>) -> PythonBackend {
+    // Per-call override (preferred for YAML-defined nodes).
+    if let Some(v) = args_obj.get("python_backend").and_then(|v| v.as_str()) {
+        return match v.trim().to_lowercase().as_str() {
+            "monty" => PythonBackend::Monty,
+            "subprocess" | "python3" => PythonBackend::Subprocess,
+            _ => PythonBackend::Subprocess,
+        };
+    }
+    // Compatibility with RLM tool shape.
+    if let Some(v) = args_obj.get("_sandbox").and_then(|v| v.as_str()) {
+        if v.trim().eq_ignore_ascii_case("monty") {
+            return PythonBackend::Monty;
+        }
+    }
+
     match std::env::var("HORIZONS_GRAPH_PYTHON_BACKEND")
         .unwrap_or_else(|_| "subprocess".to_string())
         .trim()
@@ -108,6 +126,25 @@ fn selected_backend() -> PythonBackend {
     {
         "monty" => PythonBackend::Monty,
         _ => PythonBackend::Subprocess,
+    }
+}
+
+#[cfg(all(test, feature = "monty"))]
+mod tests {
+    use super::run_python;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn python_function_can_run_with_monty_backend_override() {
+        let args = json!({
+            "mode": "python_function",
+            "python_backend": "monty",
+            "fn_str": "def add(x: int, y: int) -> int:\n    return x + y\n",
+            "inputs": { "x": 2, "y": 3 },
+            "state": {},
+        });
+        let out = run_python(&args).await.expect("monty run");
+        assert_eq!(out, json!(5));
     }
 }
 

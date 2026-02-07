@@ -88,3 +88,12 @@ class EventsAPI:
         resp = await self._client._request("POST", "/api/v1/subscriptions", json=body)
         data = await self._client.json(resp)
         return data.get("subscription_id")
+
+    async def list_subscriptions(self) -> List[models.Subscription]:
+        resp = await self._client._request("GET", "/api/v1/subscriptions")
+        data = await self._client.json(resp)
+        return [models.Subscription.model_validate(s) for s in data]
+
+    async def unsubscribe(self, subscription_id: str) -> None:
+        resp = await self._client._request("DELETE", f"/api/v1/subscriptions/{subscription_id}")
+        await self._client.json(resp)

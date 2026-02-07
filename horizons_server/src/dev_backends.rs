@@ -22,7 +22,9 @@ use horizons_core::evaluation::wiring::build_rlm_evaluator;
 use horizons_core::events::bus::RedisEventBus;
 use horizons_core::events::config::EventSyncConfig;
 use horizons_core::events::models::{Event, EventQuery, EventStatus, Subscription};
+use horizons_core::events::operations::CentralDbOperationExecutor;
 use horizons_core::events::traits::EventBus;
+use horizons_core::events::webhook::WebhookSender;
 use horizons_core::events::{Error as EventsError, Result as EventsResult};
 #[cfg(feature = "memory")]
 use horizons_core::memory::traits::HorizonsMemory;
@@ -34,10 +36,12 @@ use horizons_core::models::{
 use horizons_core::onboard::config::{PostgresConfig, RedisConfig};
 use horizons_core::onboard::postgres::PostgresCentralDb;
 use horizons_core::onboard::redis::RedisCache;
+use horizons_core::onboard::secrets::CredentialManager;
 use horizons_core::onboard::traits::{
-    AuditQuery, Cache, CentralDb, ConnectorCredential, Filestore, GraphStore, ListQuery, OrgRecord,
-    ProjectDb, ProjectDbParam, ProjectDbRow, ProjectDbValue, SyncState, SyncStateKey, UserRecord,
-    UserRole, VectorMatch, VectorStore,
+    ApiKeyRecord, AuditQuery, Cache, CentralDb, ConnectorCredential, Filestore, GraphStore,
+    ListQuery, OperationRecord, OperationRunRecord, OrgRecord, ProjectDb, ProjectDbParam,
+    ProjectDbRow, ProjectDbValue, ResourceRecord, SyncState, SyncStateKey, UserRecord, UserRole,
+    VectorMatch, VectorStore,
 };
 #[cfg(feature = "optimization")]
 use horizons_core::optimization::engine::OptimizationEngine;
@@ -396,8 +400,10 @@ impl CoreAgentSpec for DevNoopAgent {
         &self,
         _ctx: horizons_core::core_agents::models::AgentContext,
         _inputs: Option<serde_json::Value>,
-    ) -> CoreResult<Vec<horizons_core::core_agents::models::ActionProposal>> {
-        Ok(Vec::new())
+    ) -> CoreResult<horizons_core::core_agents::models::AgentOutcome> {
+        Ok(horizons_core::core_agents::models::AgentOutcome::Proposals(
+            Vec::new(),
+        ))
     }
 }
 
@@ -405,9 +411,13 @@ impl CoreAgentSpec for DevNoopAgent {
 pub struct DevCentralDb {
     orgs: Arc<RwLock<HashMap<OrgId, OrgRecord>>>,
     users: Arc<RwLock<HashMap<(OrgId, Uuid), UserRecord>>>,
+    api_keys: Arc<RwLock<HashMap<Uuid, ApiKeyRecord>>>,
     platform_config: Arc<RwLock<HashMap<OrgId, PlatformConfig>>>,
     audit: Arc<RwLock<HashMap<OrgId, Vec<AuditEntry>>>>,
     credentials: Arc<RwLock<HashMap<(OrgId, String), ConnectorCredential>>>,
+    resources: Arc<RwLock<HashMap<(OrgId, String), ResourceRecord>>>,
+    operations: Arc<RwLock<HashMap<(OrgId, String), OperationRecord>>>,
+    operation_runs: Arc<RwLock<Vec<OperationRunRecord>>>,
     sync_state: Arc<RwLock<HashMap<String, SyncState>>>,
     sources: Arc<RwLock<HashMap<(OrgId, String), SourceConfig>>>,
     runs: Arc<RwLock<Vec<RefreshRun>>>,
@@ -419,9 +429,13 @@ impl DevCentralDb {
         Self {
             orgs: Arc::new(RwLock::new(HashMap::new())),
             users: Arc::new(RwLock::new(HashMap::new())),
+            api_keys: Arc::new(RwLock::new(HashMap::new())),
             platform_config: Arc::new(RwLock::new(HashMap::new())),
             audit: Arc::new(RwLock::new(HashMap::new())),
             credentials: Arc::new(RwLock::new(HashMap::new())),
+            resources: Arc::new(RwLock::new(HashMap::new())),
+            operations: Arc::new(RwLock::new(HashMap::new())),
+            operation_runs: Arc::new(RwLock::new(Vec::new())),
             sync_state: Arc::new(RwLock::new(HashMap::new())),
             sources: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(Vec::new())),
@@ -481,6 +495,52 @@ impl CentralDb for DevCentralDb {
             .skip(query.offset)
             .take(query.limit)
             .collect())
+    }
+
+    async fn upsert_api_key(&self, key: &ApiKeyRecord) -> CoreResult<()> {
+        self.api_keys.write().await.insert(key.key_id, key.clone());
+        Ok(())
+    }
+
+    async fn get_api_key_by_id(&self, key_id: Uuid) -> CoreResult<Option<ApiKeyRecord>> {
+        Ok(self.api_keys.read().await.get(&key_id).cloned())
+    }
+
+    async fn list_api_keys(
+        &self,
+        org_id: OrgId,
+        query: ListQuery,
+    ) -> CoreResult<Vec<ApiKeyRecord>> {
+        let keys = self.api_keys.read().await;
+        let mut rows: Vec<ApiKeyRecord> = keys
+            .values()
+            .filter(|k| k.org_id == org_id)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|k| (k.created_at, k.key_id));
+        rows.reverse();
+        Ok(rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect())
+    }
+
+    async fn delete_api_key(&self, org_id: OrgId, key_id: Uuid) -> CoreResult<()> {
+        let mut keys = self.api_keys.write().await;
+        let should_remove = keys.get(&key_id).is_some_and(|k| k.org_id == org_id);
+        if should_remove {
+            keys.remove(&key_id);
+        }
+        Ok(())
+    }
+
+    async fn touch_api_key_last_used(&self, key_id: Uuid, at: DateTime<Utc>) -> CoreResult<()> {
+        let mut keys = self.api_keys.write().await;
+        if let Some(k) = keys.get_mut(&key_id) {
+            k.last_used_at = Some(at);
+        }
+        Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -576,6 +636,136 @@ impl CentralDb for DevCentralDb {
             .await
             .remove(&(org_id, connector_id.to_string()));
         Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_connector_credentials(
+        &self,
+        org_id: OrgId,
+    ) -> CoreResult<Vec<ConnectorCredential>> {
+        let creds = self.credentials.read().await;
+        Ok(creds
+            .iter()
+            .filter(|((oid, _), _)| *oid == org_id)
+            .map(|(_, v)| v.clone())
+            .collect())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn upsert_resource(&self, resource: &ResourceRecord) -> CoreResult<()> {
+        self.resources.write().await.insert(
+            (resource.org_id, resource.resource_id.clone()),
+            resource.clone(),
+        );
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_resource(
+        &self,
+        org_id: OrgId,
+        resource_id: &str,
+    ) -> CoreResult<Option<ResourceRecord>> {
+        Ok(self
+            .resources
+            .read()
+            .await
+            .get(&(org_id, resource_id.to_string()))
+            .cloned())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_resources(
+        &self,
+        org_id: OrgId,
+        query: ListQuery,
+    ) -> CoreResult<Vec<ResourceRecord>> {
+        let resources = self.resources.read().await;
+        let mut rows: Vec<ResourceRecord> = resources
+            .values()
+            .filter(|r| r.org_id == org_id)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|r| (r.updated_at, r.resource_id.clone()));
+        rows.reverse();
+        Ok(rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn upsert_operation(&self, operation: &OperationRecord) -> CoreResult<()> {
+        self.operations.write().await.insert(
+            (operation.org_id, operation.operation_id.clone()),
+            operation.clone(),
+        );
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_operation(
+        &self,
+        org_id: OrgId,
+        operation_id: &str,
+    ) -> CoreResult<Option<OperationRecord>> {
+        Ok(self
+            .operations
+            .read()
+            .await
+            .get(&(org_id, operation_id.to_string()))
+            .cloned())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_operations(
+        &self,
+        org_id: OrgId,
+        query: ListQuery,
+    ) -> CoreResult<Vec<OperationRecord>> {
+        let operations = self.operations.read().await;
+        let mut rows: Vec<OperationRecord> = operations
+            .values()
+            .filter(|o| o.org_id == org_id)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|o| (o.updated_at, o.operation_id.clone()));
+        rows.reverse();
+        Ok(rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn append_operation_run(&self, run: &OperationRunRecord) -> CoreResult<()> {
+        self.operation_runs.write().await.push(run.clone());
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_operation_runs(
+        &self,
+        org_id: OrgId,
+        operation_id: Option<&str>,
+        query: ListQuery,
+    ) -> CoreResult<Vec<OperationRunRecord>> {
+        let runs = self.operation_runs.read().await;
+        let mut out: Vec<OperationRunRecord> = runs
+            .iter()
+            .filter(|r| r.org_id == org_id)
+            .filter(|r| operation_id.map(|op| r.operation_id == op).unwrap_or(true))
+            .cloned()
+            .collect();
+        out.sort_by_key(|r| (r.created_at, r.id));
+        out.reverse();
+        Ok(out
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1445,6 +1635,16 @@ impl EventBus for DevEventBus {
         out.truncate(filter.limit);
         Ok(out)
     }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_subscriptions(&self, org_id: &str) -> EventsResult<Vec<Subscription>> {
+        let subs = self.subs.read().await;
+        Ok(subs
+            .iter()
+            .filter(|s| s.org_id == org_id)
+            .cloned()
+            .collect())
+    }
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -1469,8 +1669,20 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         db.migrate().await?;
         Arc::new(db)
     } else {
-        Arc::new(DevCentralDb::new())
+        // Use durable SQLite-backed CentralDb instead of in-memory DevCentralDb.
+        // Data survives across restarts (stored at {data_dir}/central.db).
+        let db = horizons_core::onboard::sqlite::SqliteCentralDb::new(data_dir.join("central.db"))
+            .await?;
+        Arc::new(db)
     };
+
+    // Secrets: local dev uses a file-backed 32-byte master key under the data dir.
+    // This enables `$cred:...` token resolution for connectors, agents, and managed operations.
+    let master_key_path = data_dir.join("master.key");
+    let master_key = CredentialManager::generate_or_load_key(&master_key_path)
+        .map_err(|e| anyhow::anyhow!("master key: {e}"))?;
+    let credential_manager = Arc::new(CredentialManager::new(central_db.clone(), &master_key));
+
     let project_db = Arc::new(DevProjectDb::new(data_dir.join("project_dbs")).await?);
     let filestore = Arc::new(DevFilestore::new(data_dir.join("files")).await?);
     let cache: Arc<dyn Cache> = if let Some(url) = redis_url.clone() {
@@ -1499,45 +1711,52 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
     } else {
         Arc::new(DevVectorStore::new())
     };
-    let event_bus: Arc<dyn EventBus> =
-        if let (Some(pg), Some(redis)) = (central_db_url.clone(), redis_url.clone()) {
-            let mut cfg = EventSyncConfig::default();
-            cfg.postgres_url = pg;
-            cfg.redis_url = redis;
-            Arc::new(RedisEventBus::connect(cfg).await?)
-        } else {
-            Arc::new(DevEventBus::new())
-        };
+    let event_bus: Arc<dyn EventBus> = if let (Some(pg), Some(redis)) =
+        (central_db_url.clone(), redis_url.clone())
+    {
+        let mut cfg = EventSyncConfig::default();
+        cfg.postgres_url = pg;
+        cfg.redis_url = redis;
+        let op_exec = Arc::new(CentralDbOperationExecutor::new(
+            central_db.clone(),
+            Some(credential_manager.clone()),
+            WebhookSender::new(std::time::Duration::from_millis(
+                cfg.outbound_webhook_timeout_ms,
+            )),
+        )) as Arc<dyn horizons_core::events::operations::OperationExecutor>;
+        Arc::new(RedisEventBus::connect(cfg, Some(op_exec)).await?)
+    } else {
+        Arc::new(DevEventBus::new())
+    };
 
-    let context_refresh: Arc<dyn ContextRefreshTrait> = Arc::new(ContextRefreshEngine::new(
-        central_db.clone(),
-        project_db.clone(),
-        event_bus.clone(),
-    ));
-    context_refresh
-        .register_connector(Arc::new(DevNoopConnector))
-        .await?;
+    // Near-term MCP scope provider is env-driven.
+    // Used both by the MCP gateway and `ReviewMode::McpAuth` action gates.
+    let mcp_scopes = std::env::var("HORIZONS_MCP_SCOPES")
+        .ok()
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    let mcp_scope_provider: Arc<dyn McpScopeProvider> =
+        Arc::new(StaticMcpScopeProvider { scopes: mcp_scopes });
 
-    let core_agents = Arc::new(CoreAgentsExecutor::new(
-        central_db.clone(),
-        project_db.clone(),
-        event_bus.clone(),
-        None,
-    ));
+    let core_agents = Arc::new(
+        CoreAgentsExecutor::new(
+            central_db.clone(),
+            project_db.clone(),
+            event_bus.clone(),
+            None,
+        )
+        .with_credential_manager(credential_manager.clone())
+        .with_mcp_scope_provider(mcp_scope_provider.clone()),
+    );
     core_agents.register_agent(Arc::new(DevNoopAgent)).await?;
 
     let mcp_gateway: Option<Arc<McpGateway>> = if let Ok(cfg) = std::env::var("HORIZONS_MCP_CONFIG")
     {
-        let scopes = std::env::var("HORIZONS_MCP_SCOPES")
-            .ok()
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        let scope_provider = Arc::new(StaticMcpScopeProvider { scopes });
-        let gateway = Arc::new(McpGateway::new(scope_provider));
+        let gateway = Arc::new(McpGateway::new(mcp_scope_provider.clone()));
         let servers = parse_mcp_config(&cfg)?;
         gateway.reconfigure(servers).await?;
         Some(gateway)
@@ -1575,6 +1794,15 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
             ),
         ) as Arc<dyn horizons_core::pipelines::traits::PipelineRunner>
     };
+
+    let context_refresh: Arc<dyn ContextRefreshTrait> = Arc::new(
+        ContextRefreshEngine::new(central_db.clone(), project_db.clone(), event_bus.clone())
+            .with_credential_manager(credential_manager.clone())
+            .with_pipeline_runner(pipelines.clone()),
+    );
+    context_refresh
+        .register_connector(Arc::new(DevNoopConnector))
+        .await?;
 
     #[cfg(feature = "memory")]
     let memory: Arc<dyn HorizonsMemory> = {
@@ -1732,6 +1960,7 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         context_refresh,
         core_agents,
         pipelines,
+        Some(credential_manager),
         mcp_gateway,
         sandbox_runtime,
         #[cfg(feature = "memory")]

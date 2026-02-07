@@ -60,14 +60,17 @@ class EventDirection(str, Enum):
 class EventStatus(str, Enum):
     pending = "pending"
     processing = "processing"
-    succeeded = "succeeded"
     failed = "failed"
+    delivered = "delivered"
+    dead_lettered = "dead_lettered"
 
 
 class Event(BaseModel):
-    event_id: str
+    id: str
     org_id: str
     project_id: Optional[str] = None
+    timestamp: datetime
+    received_at: datetime
     topic: str
     source: str
     direction: EventDirection
@@ -75,27 +78,43 @@ class Event(BaseModel):
     dedupe_key: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
     status: EventStatus
-    created_at: datetime
+    retry_count: int
+    last_attempt_at: Optional[datetime] = None
 
 
 class SubscriptionHandlerType(str, Enum):
     webhook = "webhook"
+    operation = "operation"
     internal_queue = "internal_queue"
+    callback = "callback"
 
 
 class SubscriptionHandler(BaseModel):
     type: SubscriptionHandlerType
     url: Optional[str] = None
+    headers: Optional[List[List[str]]] = None
+    timeout_ms: Optional[int] = None
+    operation_id: Optional[str] = None
+    environment: Optional[str] = None
     queue_name: Optional[str] = None
+    handler_id: Optional[str] = None
+
+
+class CircuitBreakerConfig(BaseModel):
+    failure_threshold: int = 10
+    open_duration_ms: int = 30_000
+    success_threshold: int = 3
 
 
 class SubscriptionConfig(BaseModel):
-    max_attempts: int = 3
-    backoff_ms: int = 1000
+    max_retries: int = 5
+    retry_backoff_base_ms: int = 1000
+    retry_backoff_max_ms: int = 60_000
+    circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
 
 
 class Subscription(BaseModel):
-    subscription_id: str
+    id: str
     org_id: str
     topic_pattern: str
     direction: EventDirection
@@ -132,6 +151,8 @@ class ActionStatus(str, Enum):
     proposed = "proposed"
     approved = "approved"
     denied = "denied"
+    dispatched = "dispatched"
+    # Legacy name (server previously returned "executed" for "dispatched").
     executed = "executed"
     expired = "expired"
 

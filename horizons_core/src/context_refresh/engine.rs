@@ -1,6 +1,6 @@
 use crate::context_refresh::models::{
     ContextEntity, RefreshRun, RefreshRunQuery, RefreshRunStatus, RefreshTrigger, SourceConfig,
-    SyncCursor,
+    SourceProcessorSpec, SyncCursor,
 };
 use crate::context_refresh::traits::{
     Connector, ContextRefresh, PullResult, RefreshResult, RefreshStatus,
@@ -8,9 +8,12 @@ use crate::context_refresh::traits::{
 use crate::events::models::{Event, EventDirection};
 use crate::events::traits::EventBus;
 use crate::models::{AgentIdentity, OrgId};
+use crate::onboard::secrets::CredentialManager;
 use crate::onboard::traits::{
     CentralDb, ListQuery, ProjectDb, ProjectDbParam, SyncState, SyncStateKey, ensure_handle_org,
 };
+use crate::pipelines::models::{PipelineSpec, StepKind};
+use crate::pipelines::traits::PipelineRunner;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -25,6 +28,8 @@ pub struct ContextRefreshEngine {
     project_db: Arc<dyn ProjectDb>,
     event_bus: Arc<dyn EventBus>,
     connectors: RwLock<HashMap<String, Arc<dyn Connector>>>,
+    credential_manager: Option<Arc<CredentialManager>>,
+    pipelines: Option<Arc<dyn PipelineRunner>>,
 }
 
 impl ContextRefreshEngine {
@@ -39,7 +44,21 @@ impl ContextRefreshEngine {
             project_db,
             event_bus,
             connectors: RwLock::new(HashMap::new()),
+            credential_manager: None,
+            pipelines: None,
         }
+    }
+
+    /// Set the credential manager for resolving `$cred:` tokens in source settings.
+    pub fn with_credential_manager(mut self, cm: Arc<CredentialManager>) -> Self {
+        self.credential_manager = Some(cm);
+        self
+    }
+
+    /// Set a pipeline runner used for non-connector processing (graphs/agents/tools as pipeline steps).
+    pub fn with_pipeline_runner(mut self, pipelines: Arc<dyn PipelineRunner>) -> Self {
+        self.pipelines = Some(pipelines);
+        self
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -247,6 +266,136 @@ ON CONFLICT(org_id, dedupe_key) DO UPDATE SET
             .await
             .map_err(|e| Error::backend("publish context.refreshed event", e))
     }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn process_records(
+        &self,
+        identity: &AgentIdentity,
+        org_id: OrgId,
+        source: &SourceConfig,
+        connector: Arc<dyn Connector>,
+        records: Vec<crate::context_refresh::traits::RawRecord>,
+        resolved_source: &SourceConfig,
+    ) -> Result<Vec<ContextEntity>> {
+        match &source.processor {
+            SourceProcessorSpec::Connector => connector.process(org_id, source, records).await,
+            SourceProcessorSpec::Pipeline {
+                spec,
+                entities_step_id,
+            } => {
+                let Some(pipelines) = self.pipelines.clone() else {
+                    return Err(Error::InvalidInput(
+                        "source processor 'pipeline' requires pipelines runner".to_string(),
+                    ));
+                };
+
+                // Make the stored spec tenant-correct and ensure agent steps can persist outputs.
+                let mut spec = spec.clone();
+                spec.org_id = source.org_id.to_string();
+                inject_project_db_handle_into_pipeline_agents(&mut spec, &source.project_db);
+
+                // Provide a stable contract for ingestion pipelines.
+                let inputs = serde_json::json!({
+                    "source": resolved_source,
+                    "records": records,
+                    "settings": resolved_source.settings,
+                });
+
+                let run = pipelines.run(&spec, inputs, identity).await?;
+                let step = run
+                    .step_results
+                    .get(entities_step_id)
+                    .ok_or_else(|| {
+                        Error::InvalidInput(format!(
+                            "pipeline did not produce step_results for entities_step_id='{entities_step_id}'"
+                        ))
+                    })?;
+
+                if step.status != crate::pipelines::models::StepStatus::Succeeded {
+                    return Err(Error::BackendMessage(format!(
+                        "entities step did not succeed: step_id={entities_step_id} status={:?} error={:?}",
+                        step.status, step.error
+                    )));
+                }
+
+                let output = step.output.clone().unwrap_or(serde_json::Value::Null);
+                let entities_val = output
+                    .get("entities")
+                    .cloned()
+                    .unwrap_or(output.clone());
+                let arr = entities_val.as_array().ok_or_else(|| {
+                    Error::InvalidInput(
+                        "pipeline entities output must be an array or {\"entities\": [...]}"
+                            .to_string(),
+                    )
+                })?;
+
+                let now = Utc::now();
+                let mut out: Vec<ContextEntity> = Vec::with_capacity(arr.len());
+                for (idx, item) in arr.iter().enumerate() {
+                    let obj = item.as_object().ok_or_else(|| {
+                        Error::InvalidInput(format!(
+                            "pipeline entity at index {idx} must be an object"
+                        ))
+                    })?;
+
+                    let entity_type = obj
+                        .get("entity_type")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            Error::InvalidInput(format!(
+                                "pipeline entity at index {idx} missing entity_type"
+                            ))
+                        })?;
+                    let content = obj
+                        .get("content")
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::InvalidInput(format!(
+                                "pipeline entity at index {idx} missing content"
+                            ))
+                        })?;
+                    let dedupe_key = obj
+                        .get("dedupe_key")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            Error::InvalidInput(format!(
+                                "pipeline entity at index {idx} missing dedupe_key"
+                            ))
+                        })?;
+                    let source_id = obj
+                        .get("source_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&source.source_id);
+
+                    let acl = obj
+                        .get("acl")
+                        .and_then(|v| v.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|s| s.as_str().map(|x| x.to_string()))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+
+                    out.push(ContextEntity::new(
+                        source.org_id,
+                        Some(source.project_id),
+                        entity_type,
+                        content,
+                        source.connector_id.clone(),
+                        source_id.to_string(),
+                        dedupe_key.to_string(),
+                        acl,
+                        Some(now),
+                    )?);
+                }
+
+                Ok(out)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -270,6 +419,14 @@ impl ContextRefresh for ContextRefreshEngine {
     ) -> Result<()> {
         // Ensure connector is registered before we persist the source.
         self.validate_source_has_connector(&source).await?;
+
+        // Auto-merge credentials into source settings at registration time.
+        // This resolves `$cred:connector_id` tokens in `settings` so the
+        // connector can validate its config immediately, and the stored settings
+        // are ready for use without manual credential merging by the caller.
+        if let Some(cm) = &self.credential_manager {
+            source.settings = cm.resolve(source.org_id, &source.settings).await?;
+        }
 
         source.touch(Utc::now());
         self.central_db.upsert_source_config(&source).await?;
@@ -334,15 +491,29 @@ impl ContextRefresh for ContextRefreshEngine {
         )?;
         self.central_db.upsert_refresh_run(&run).await?;
 
+        // Resolve credential tokens in source settings before pulling.
+        let resolved_source = match &self.credential_manager {
+            Some(cm) => {
+                let resolved_settings = cm.resolve(org_id, &source.settings).await?;
+                SourceConfig {
+                    settings: resolved_settings,
+                    ..source.clone()
+                }
+            }
+            None => source.clone(),
+        };
+
         // Pull and process.
         let cursor = self.load_cursor(&source).await?;
         let PullResult {
             records,
             next_cursor,
-        } = connector.pull(org_id, &source, cursor).await?;
+        } = connector.pull(org_id, &resolved_source, cursor).await?;
         let records_pulled = records.len() as u64;
 
-        let entities = connector.process(org_id, &source, records).await?;
+        let entities = self
+            .process_records(identity, org_id, &source, connector.clone(), records, &resolved_source)
+            .await?;
 
         // Store.
         let entities_stored = self.store_entities(org_id, &source, &entities).await?;
@@ -459,5 +630,22 @@ impl ContextRefresh for ContextRefreshEngine {
             last_run: runs.into_iter().next(),
             updated_at: Utc::now(),
         })
+    }
+}
+
+fn inject_project_db_handle_into_pipeline_agents(spec: &mut PipelineSpec, handle: &crate::models::ProjectDbHandle) {
+    for step in spec.steps.iter_mut() {
+        if let StepKind::Agent { spec: agent_spec } = &mut step.kind {
+            // Mirror the convenience behavior in `horizons_server/src/routes/pipelines.rs`.
+            if let serde_json::Value::Object(m) = &mut agent_spec.context {
+                m.entry("_project_db_handle".to_string())
+                    .or_insert_with(|| serde_json::to_value(handle).unwrap_or(serde_json::Value::Null));
+            } else if agent_spec.context.is_null() {
+                agent_spec.context = serde_json::json!({ "_project_db_handle": handle });
+            } else {
+                agent_spec.context =
+                    serde_json::json!({ "_project_db_handle": handle, "context": agent_spec.context });
+            }
+        }
     }
 }

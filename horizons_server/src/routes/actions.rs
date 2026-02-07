@@ -70,22 +70,6 @@ pub async fn propose_action(
     let ttl = req.ttl_seconds.unwrap_or(60 * 60);
     let now = Utc::now();
 
-    let mut ctx = req.context;
-    // Embed the DB handle so CoreAgentsExecutor can persist actions to the project DB.
-    if let serde_json::Value::Object(m) = &mut ctx {
-        m.insert(
-            "_project_db_handle".to_string(),
-            serde_json::to_value(&handle).map_err(|e| {
-                ApiError::Core(horizons_core::Error::backend("serialize handle", e))
-            })?,
-        );
-    } else {
-        ctx = serde_json::json!({
-            "_project_db_handle": handle,
-            "context": ctx
-        });
-    }
-
     let proposal = ActionProposal::new(
         org_id,
         project_id,
@@ -94,14 +78,14 @@ pub async fn propose_action(
         req.payload,
         req.risk_level,
         req.dedupe_key,
-        ctx,
+        req.context,
         now,
         ttl,
     )?;
 
     let action_id = state
         .core_agents
-        .propose_action(proposal, &identity)
+        .propose_action(org_id, project_id, &handle, proposal, &identity)
         .await?;
     Ok(Json(ProposeActionResponse { action_id }))
 }
@@ -122,21 +106,9 @@ pub async fn approve_action(
     let handle = resolve_project_handle(org_id, project_id, &state).await?;
     let action_id = Uuid::parse_str(&id).map_err(|e| ApiError::InvalidInput(e.to_string()))?;
 
-    let approver_id = match &identity {
-        horizons_core::AgentIdentity::User { user_id, .. } => user_id.to_string(),
-        horizons_core::AgentIdentity::Agent { agent_id } => agent_id.clone(),
-        horizons_core::AgentIdentity::System { name } => format!("system:{name}"),
-    };
     state
         .core_agents
-        .approve(
-            org_id,
-            project_id,
-            &handle,
-            action_id,
-            &approver_id,
-            &req.reason,
-        )
+        .approve(org_id, project_id, &handle, action_id, &identity, &req.reason)
         .await?;
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
@@ -157,21 +129,9 @@ pub async fn deny_action(
     let handle = resolve_project_handle(org_id, project_id, &state).await?;
     let action_id = Uuid::parse_str(&id).map_err(|e| ApiError::InvalidInput(e.to_string()))?;
 
-    let approver_id = match &identity {
-        horizons_core::AgentIdentity::User { user_id, .. } => user_id.to_string(),
-        horizons_core::AgentIdentity::Agent { agent_id } => agent_id.clone(),
-        horizons_core::AgentIdentity::System { name } => format!("system:{name}"),
-    };
     state
         .core_agents
-        .deny(
-            org_id,
-            project_id,
-            &handle,
-            action_id,
-            &approver_id,
-            &req.reason,
-        )
+        .deny(org_id, project_id, &handle, action_id, &identity, &req.reason)
         .await?;
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }

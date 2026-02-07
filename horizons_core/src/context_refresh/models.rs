@@ -4,6 +4,30 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// How pulled records are transformed into `ContextEntity` objects.
+///
+/// Default is `Connector` (connector provides `process()`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SourceProcessorSpec {
+    /// Use the registered connector's `process()` implementation.
+    Connector,
+    /// Run a pipeline after `pull()` to produce normalized entities.
+    ///
+    /// The pipeline must produce an `entities` array (either as the step output itself,
+    /// or as `{ "entities": [...] }`) in the configured `entities_step_id`.
+    Pipeline {
+        spec: crate::pipelines::models::PipelineSpec,
+        entities_step_id: String,
+    },
+}
+
+impl Default for SourceProcessorSpec {
+    fn default() -> Self {
+        SourceProcessorSpec::Connector
+    }
+}
+
 /// A normalized entity produced by Context Refresh and stored for later retrieval by agents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextEntity {
@@ -172,6 +196,11 @@ pub struct SourceConfig {
     pub enabled: bool,
     pub schedule: Option<CronSchedule>,
     pub event_triggers: Vec<EventTriggerConfig>,
+    /// Optional processing layer on top of `pull()`.
+    ///
+    /// If not set in stored configs, defaults to `connector`.
+    #[serde(default)]
+    pub processor: SourceProcessorSpec,
     /// Connector-specific configuration blob (auth references, filters, etc.).
     pub settings: serde_json::Value,
     pub created_at: DateTime<Utc>,
@@ -225,6 +254,7 @@ impl SourceConfig {
             enabled,
             schedule,
             event_triggers,
+            processor: SourceProcessorSpec::default(),
             settings,
             created_at: now,
             updated_at: now,

@@ -4,8 +4,8 @@ use crate::context_refresh::models::{
 use crate::models::{AgentIdentity, AuditEntry, OrgId, PlatformConfig, ProjectDbHandle, ProjectId};
 use crate::onboard::config::PostgresConfig;
 use crate::onboard::models::{
-    AuditQuery, ConnectorCredential, ListQuery, OrgRecord, SyncState, SyncStateKey, UserRecord,
-    UserRole,
+    ApiKeyRecord, AuditQuery, ConnectorCredential, ListQuery, OperationRecord, OperationRunRecord,
+    OrgRecord, ResourceRecord, SyncState, SyncStateKey, UserRecord, UserRole,
 };
 use crate::onboard::traits::CentralDb;
 use crate::{Error, Result};
@@ -48,10 +48,15 @@ impl PostgresCentralDb {
     #[tracing::instrument(level = "info", skip(self))]
     pub async fn migrate(&self) -> Result<()> {
         // Single-file migration to keep v0.0.0 self-hosted setup simple.
-        sqlx::query(MIGRATION_0001)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| Error::backend("apply migrations", e))?;
+        //
+        // Postgres does not allow multiple SQL statements in a prepared statement, and
+        // `sqlx::query(...)` prepares the query. Split on ';' like `project_db_migrate`.
+        for stmt in MIGRATION_0001.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            sqlx::query(stmt)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::backend("apply migrations", e))?;
+        }
         Ok(())
     }
 
@@ -117,6 +122,123 @@ impl PostgresCentralDb {
             updated_at: row
                 .try_get("updated_at")
                 .map_err(|e| Error::backend("updated_at", e))?,
+        })
+    }
+
+    #[tracing::instrument(level = "debug", skip(row))]
+    fn api_key_from_row(row: &PgRow) -> Result<ApiKeyRecord> {
+        let actor: sqlx::types::Json<AgentIdentity> = row
+            .try_get("actor")
+            .map_err(|e| Error::backend("api_key actor", e))?;
+        let scopes: sqlx::types::Json<Vec<String>> = row
+            .try_get("scopes")
+            .map_err(|e| Error::backend("api_key scopes", e))?;
+
+        Ok(ApiKeyRecord {
+            key_id: row
+                .try_get("key_id")
+                .map_err(|e| Error::backend("key_id", e))?,
+            org_id: OrgId(
+                row.try_get::<Uuid, _>("org_id")
+                    .map_err(|e| Error::backend("org_id", e))?,
+            ),
+            name: row.try_get("name").map_err(|e| Error::backend("name", e))?,
+            actor: actor.0,
+            scopes: scopes.0,
+            secret_hash: row
+                .try_get("secret_hash")
+                .map_err(|e| Error::backend("secret_hash", e))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| Error::backend("created_at", e))?,
+            expires_at: row
+                .try_get("expires_at")
+                .map_err(|e| Error::backend("expires_at", e))?,
+            last_used_at: row
+                .try_get("last_used_at")
+                .map_err(|e| Error::backend("last_used_at", e))?,
+        })
+    }
+
+    #[tracing::instrument(level = "debug", skip(row))]
+    fn resource_from_row(row: &PgRow) -> Result<ResourceRecord> {
+        Ok(ResourceRecord {
+            org_id: OrgId(
+                row.try_get::<Uuid, _>("org_id")
+                    .map_err(|e| Error::backend("org_id", e))?,
+            ),
+            resource_id: row
+                .try_get("resource_id")
+                .map_err(|e| Error::backend("resource_id", e))?,
+            resource_type: row
+                .try_get("resource_type")
+                .map_err(|e| Error::backend("resource_type", e))?,
+            config: row
+                .try_get("config")
+                .map_err(|e| Error::backend("config", e))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| Error::backend("created_at", e))?,
+            updated_at: row
+                .try_get("updated_at")
+                .map_err(|e| Error::backend("updated_at", e))?,
+        })
+    }
+
+    #[tracing::instrument(level = "debug", skip(row))]
+    fn operation_from_row(row: &PgRow) -> Result<OperationRecord> {
+        Ok(OperationRecord {
+            org_id: OrgId(
+                row.try_get::<Uuid, _>("org_id")
+                    .map_err(|e| Error::backend("org_id", e))?,
+            ),
+            operation_id: row
+                .try_get("operation_id")
+                .map_err(|e| Error::backend("operation_id", e))?,
+            resource_id: row
+                .try_get("resource_id")
+                .map_err(|e| Error::backend("resource_id", e))?,
+            operation_type: row
+                .try_get("operation_type")
+                .map_err(|e| Error::backend("operation_type", e))?,
+            config: row
+                .try_get("config")
+                .map_err(|e| Error::backend("config", e))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| Error::backend("created_at", e))?,
+            updated_at: row
+                .try_get("updated_at")
+                .map_err(|e| Error::backend("updated_at", e))?,
+        })
+    }
+
+    #[tracing::instrument(level = "debug", skip(row))]
+    fn operation_run_from_row(row: &PgRow) -> Result<OperationRunRecord> {
+        Ok(OperationRunRecord {
+            id: row.try_get("id").map_err(|e| Error::backend("id", e))?,
+            org_id: OrgId(
+                row.try_get::<Uuid, _>("org_id")
+                    .map_err(|e| Error::backend("org_id", e))?,
+            ),
+            operation_id: row
+                .try_get("operation_id")
+                .map_err(|e| Error::backend("operation_id", e))?,
+            source_event_id: row
+                .try_get("source_event_id")
+                .map_err(|e| Error::backend("source_event_id", e))?,
+            status: row
+                .try_get("status")
+                .map_err(|e| Error::backend("status", e))?,
+            error: row
+                .try_get("error")
+                .map_err(|e| Error::backend("error", e))?,
+            output: row
+                .try_get("output")
+                .map_err(|e| Error::backend("output", e))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| Error::backend("created_at", e))?,
         })
     }
 
@@ -215,6 +337,13 @@ impl PostgresCentralDb {
             .try_get("event_triggers")
             .map_err(|e| Error::backend("event_triggers", e))?;
 
+        let processor: crate::context_refresh::models::SourceProcessorSpec = row
+            .try_get("processor")
+            .map_err(|e| Error::backend("processor", e))
+            .and_then(|v: serde_json::Value| {
+                serde_json::from_value(v).map_err(|e| Error::backend("deserialize processor", e))
+            })?;
+
         Ok(SourceConfig {
             org_id,
             project_id,
@@ -233,6 +362,7 @@ impl PostgresCentralDb {
                 .map_err(|e| Error::backend("enabled", e))?,
             schedule,
             event_triggers: event_triggers.0,
+            processor,
             settings: row
                 .try_get("settings")
                 .map_err(|e| Error::backend("settings", e))?,
@@ -404,6 +534,107 @@ impl CentralDb for PostgresCentralDb {
         Ok(out)
     }
 
+    #[tracing::instrument(level = "debug", skip(self, key))]
+    async fn upsert_api_key(&self, key: &ApiKeyRecord) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys
+              (key_id, org_id, name, actor, scopes, secret_hash, created_at, expires_at, last_used_at)
+            VALUES
+              ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (key_id) DO UPDATE SET
+              org_id = EXCLUDED.org_id,
+              name = EXCLUDED.name,
+              actor = EXCLUDED.actor,
+              scopes = EXCLUDED.scopes,
+              secret_hash = EXCLUDED.secret_hash,
+              expires_at = EXCLUDED.expires_at,
+              last_used_at = EXCLUDED.last_used_at
+            "#,
+        )
+        .bind(key.key_id)
+        .bind(key.org_id.0)
+        .bind(&key.name)
+        .bind(sqlx::types::Json(&key.actor))
+        .bind(sqlx::types::Json(&key.scopes))
+        .bind(&key.secret_hash)
+        .bind(key.created_at)
+        .bind(key.expires_at)
+        .bind(key.last_used_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("upsert api key", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn get_api_key_by_id(&self, key_id: Uuid) -> Result<Option<ApiKeyRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT key_id, org_id, name, actor, scopes, secret_hash, created_at, expires_at, last_used_at
+            FROM api_keys
+            WHERE key_id = $1
+            "#,
+        )
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::backend("get api key", e))?;
+
+        Ok(row.as_ref().map(Self::api_key_from_row).transpose()?)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn list_api_keys(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<ApiKeyRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT key_id, org_id, name, actor, scopes, secret_hash, created_at, expires_at, last_used_at
+            FROM api_keys
+            WHERE org_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::backend("list api keys", e))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(Self::api_key_from_row(&r)?);
+        }
+        Ok(out)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn delete_api_key(&self, org_id: OrgId, key_id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM api_keys WHERE org_id = $1 AND key_id = $2")
+            .bind(org_id.0)
+            .bind(key_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::backend("delete api key", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn touch_api_key_last_used(
+        &self,
+        key_id: Uuid,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE api_keys SET last_used_at = $2 WHERE key_id = $1")
+            .bind(key_id)
+            .bind(at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::backend("touch api key last_used_at", e))?;
+        Ok(())
+    }
+
     #[tracing::instrument(level = "debug", skip(self))]
     async fn get_platform_config(&self, org_id: OrgId) -> Result<Option<PlatformConfig>> {
         let row =
@@ -558,6 +789,216 @@ impl CentralDb for PostgresCentralDb {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn list_connector_credentials(&self, org_id: OrgId) -> Result<Vec<ConnectorCredential>> {
+        let rows = sqlx::query(
+            "SELECT org_id, connector_id, ciphertext, created_at, updated_at
+             FROM connector_credentials WHERE org_id = $1 ORDER BY connector_id",
+        )
+        .bind(org_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::backend("list connector credentials", e))?;
+        rows.iter().map(Self::credential_from_row).collect()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, resource))]
+    async fn upsert_resource(&self, resource: &ResourceRecord) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO resources (org_id, resource_id, resource_type, config, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (org_id, resource_id) DO UPDATE
+              SET resource_type = EXCLUDED.resource_type,
+                  config = EXCLUDED.config,
+                  updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(resource.org_id.0)
+        .bind(&resource.resource_id)
+        .bind(&resource.resource_type)
+        .bind(&resource.config)
+        .bind(resource.created_at)
+        .bind(resource.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("upsert resource", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn get_resource(
+        &self,
+        org_id: OrgId,
+        resource_id: &str,
+    ) -> Result<Option<ResourceRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT org_id, resource_id, resource_type, config, created_at, updated_at
+            FROM resources
+            WHERE org_id = $1 AND resource_id = $2
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(resource_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::backend("get resource", e))?;
+        Ok(row.as_ref().map(Self::resource_from_row).transpose()?)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn list_resources(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<ResourceRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT org_id, resource_id, resource_type, config, created_at, updated_at
+            FROM resources
+            WHERE org_id = $1
+            ORDER BY updated_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::backend("list resources", e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(Self::resource_from_row(&r)?);
+        }
+        Ok(out)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, operation))]
+    async fn upsert_operation(&self, operation: &OperationRecord) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO operations (org_id, operation_id, resource_id, operation_type, config, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (org_id, operation_id) DO UPDATE
+              SET resource_id = EXCLUDED.resource_id,
+                  operation_type = EXCLUDED.operation_type,
+                  config = EXCLUDED.config,
+                  updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(operation.org_id.0)
+        .bind(&operation.operation_id)
+        .bind(&operation.resource_id)
+        .bind(&operation.operation_type)
+        .bind(&operation.config)
+        .bind(operation.created_at)
+        .bind(operation.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("upsert operation", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn get_operation(
+        &self,
+        org_id: OrgId,
+        operation_id: &str,
+    ) -> Result<Option<OperationRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT org_id, operation_id, resource_id, operation_type, config, created_at, updated_at
+            FROM operations
+            WHERE org_id = $1 AND operation_id = $2
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(operation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::backend("get operation", e))?;
+        Ok(row.as_ref().map(Self::operation_from_row).transpose()?)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn list_operations(
+        &self,
+        org_id: OrgId,
+        query: ListQuery,
+    ) -> Result<Vec<OperationRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT org_id, operation_id, resource_id, operation_type, config, created_at, updated_at
+            FROM operations
+            WHERE org_id = $1
+            ORDER BY updated_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::backend("list operations", e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(Self::operation_from_row(&r)?);
+        }
+        Ok(out)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, run))]
+    async fn append_operation_run(&self, run: &OperationRunRecord) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO operation_runs (id, org_id, operation_id, source_event_id, status, error, output, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(run.id)
+        .bind(run.org_id.0)
+        .bind(&run.operation_id)
+        .bind(&run.source_event_id)
+        .bind(&run.status)
+        .bind(&run.error)
+        .bind(&run.output)
+        .bind(run.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("append operation run", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn list_operation_runs(
+        &self,
+        org_id: OrgId,
+        operation_id: Option<&str>,
+        query: ListQuery,
+    ) -> Result<Vec<OperationRunRecord>> {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT id, org_id, operation_id, source_event_id, status, error, output, created_at \
+             FROM operation_runs WHERE org_id = ",
+        );
+        qb.push_bind(org_id.0);
+        if let Some(op) = operation_id {
+            qb.push(" AND operation_id = ").push_bind(op);
+        }
+        qb.push(" ORDER BY created_at DESC LIMIT ")
+            .push_bind(query.limit as i64)
+            .push(" OFFSET ")
+            .push_bind(query.offset as i64);
+        let rows = qb
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::backend("list operation runs", e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(Self::operation_run_from_row(&r)?);
+        }
+        Ok(out)
+    }
+
     #[tracing::instrument(level = "debug", skip(self, state))]
     async fn upsert_sync_state(&self, state: &SyncState) -> Result<()> {
         match state.key.project_id {
@@ -691,9 +1132,9 @@ impl CentralDb for PostgresCentralDb {
               org_id, source_id, project_id, connector_id, scope, enabled,
               project_db_url, project_db_token,
               schedule_expr, schedule_next_run_at,
-              event_triggers, settings, created_at, updated_at
+              event_triggers, processor, settings, created_at, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             ON CONFLICT (org_id, source_id) DO UPDATE
               SET project_id = EXCLUDED.project_id,
                   connector_id = EXCLUDED.connector_id,
@@ -704,6 +1145,7 @@ impl CentralDb for PostgresCentralDb {
                   schedule_expr = EXCLUDED.schedule_expr,
                   schedule_next_run_at = EXCLUDED.schedule_next_run_at,
                   event_triggers = EXCLUDED.event_triggers,
+                  processor = EXCLUDED.processor,
                   settings = EXCLUDED.settings,
                   updated_at = EXCLUDED.updated_at
             "#,
@@ -719,6 +1161,7 @@ impl CentralDb for PostgresCentralDb {
         .bind(source.schedule.as_ref().map(|s| s.expr.as_str()))
         .bind(source.schedule.as_ref().map(|s| s.next_run_at))
         .bind(sqlx::types::Json(&source.event_triggers))
+        .bind(sqlx::types::Json(&source.processor))
         .bind(&source.settings)
         .bind(source.created_at)
         .bind(source.updated_at)
@@ -739,7 +1182,7 @@ impl CentralDb for PostgresCentralDb {
             SELECT org_id, source_id, project_id, connector_id, scope, enabled,
                    project_db_url, project_db_token,
                    schedule_expr, schedule_next_run_at,
-                   event_triggers, settings, created_at, updated_at
+                   event_triggers, processor, settings, created_at, updated_at
             FROM source_configs
             WHERE org_id = $1 AND source_id = $2
             "#,
@@ -763,7 +1206,7 @@ impl CentralDb for PostgresCentralDb {
             SELECT org_id, source_id, project_id, connector_id, scope, enabled,
                    project_db_url, project_db_token,
                    schedule_expr, schedule_next_run_at,
-                   event_triggers, settings, created_at, updated_at
+                   event_triggers, processor, settings, created_at, updated_at
             FROM source_configs
             WHERE org_id = $1
             ORDER BY created_at DESC

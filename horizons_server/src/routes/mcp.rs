@@ -1,14 +1,13 @@
 //! MCP gateway HTTP routes.
 
 use crate::error::ApiError;
-use crate::extract::OrgIdHeader;
+use crate::extract::{AuthenticatedIdentity, OrgIdHeader};
 use crate::server::AppState;
 use axum::routing::{get, post};
 use axum::{Extension, Json};
 use horizons_core::core_agents::mcp::McpClient;
 use horizons_core::core_agents::mcp::{McpToolCall, McpToolResult};
 use horizons_core::core_agents::mcp_gateway::McpServerConfig;
-use horizons_core::models::AgentIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,11 +34,7 @@ pub struct McpCallRequest {
     #[serde(default)]
     pub arguments: serde_json::Value,
     #[serde(default)]
-    pub requested_scopes: Vec<String>,
-    #[serde(default)]
     pub request_id: Option<String>,
-    #[serde(default)]
-    pub identity: Option<AgentIdentity>,
     /// Optional override of when this request was created.
     #[serde(default)]
     pub requested_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -90,7 +85,10 @@ async fn get_tools(
 /// POST /api/v1/mcp/call
 #[tracing::instrument(level = "info", skip_all)]
 async fn post_call(
-    OrgIdHeader(_org_id): OrgIdHeader,
+    AuthenticatedIdentity {
+        org_id: _org_id,
+        identity,
+    }: AuthenticatedIdentity,
     Extension(state): Extension<Arc<AppState>>,
     Json(req): Json<McpCallRequest>,
 ) -> Result<Json<McpToolResult>, ApiError> {
@@ -98,17 +96,19 @@ async fn post_call(
         ApiError::InvalidInput("mcp gateway not configured (set HORIZONS_MCP_CONFIG)".to_string())
     })?;
 
-    let identity = req.identity.unwrap_or(AgentIdentity::System {
-        name: "api".to_string(),
-    });
     let request_id = req
         .request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // Near-term hardening:
+    // - identity is derived from verified auth (mutating routes require auth by default)
+    // - do not trust caller-supplied scopes; scope assignment should come from grants/policy
+    let requested_scopes: Vec<String> = Vec::new();
+
     let call = McpToolCall::new(
         req.tool_name,
         req.arguments,
-        req.requested_scopes,
+        requested_scopes,
         identity,
         request_id,
         req.requested_at,
