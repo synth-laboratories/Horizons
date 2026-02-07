@@ -8,6 +8,11 @@ services:
     environment:
       HORIZONS_DEV_DATA_DIR: /data
       RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 volumes:
   horizons_data:
