@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { Resvg } from "@resvg/resvg-js";
 
 // ── Light theme matching Frontier aesthetic ─────────────────────
@@ -161,12 +161,13 @@ o.push(`</svg>`);
 
 // ── Write ──────────────────────────────────────────────────────
 const svg = o.join("\n");
-writeFileSync("../horizons_diagram.svg", svg, "utf8");
+mkdirSync("../out", { recursive: true });
+writeFileSync("../out/horizons_diagram.svg", svg, "utf8");
 
 const resvg = new Resvg(svg, {
   fitTo: { mode: "width", value: 2400 },
   font: { defaultFontFamily: "Helvetica" },
 });
-writeFileSync("../horizons_diagram.png", resvg.render().asPng());
+writeFileSync("../out/horizons_diagram.png", resvg.render().asPng());
 
 console.log("done");

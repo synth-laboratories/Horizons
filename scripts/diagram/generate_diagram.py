@@ -141,8 +141,20 @@ for i, ln in enumerate(lines):
     tx(ax, gx + 14, gy_top - 8 - 18*i, ln, size=9.5, color=MUTED, ha="left", weight="bold" if i >= 4 else "regular")
 
 # Save
-out = os.path.dirname(os.path.abspath(__file__))
-fig.savefig(os.path.join(out, "horizons_diagram_synth.png"), dpi=dpi, facecolor=BG, bbox_inches="tight", pad_inches=0.3)
-fig.savefig(os.path.join(out, "horizons_diagram_synth.svg"), facecolor=BG, bbox_inches="tight", pad_inches=0.3)
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+os.makedirs(out, exist_ok=True)
+fig.savefig(
+    os.path.join(out, "horizons_diagram_synth.png"),
+    dpi=dpi,
+    facecolor=BG,
+    bbox_inches="tight",
+    pad_inches=0.3,
+)
+fig.savefig(
+    os.path.join(out, "horizons_diagram_synth.svg"),
+    facecolor=BG,
+    bbox_inches="tight",
+    pad_inches=0.3,
+)
 plt.close(fig)
 print("Done")

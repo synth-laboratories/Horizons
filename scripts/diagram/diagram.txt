@@ -1,0 +1,59 @@
+                              Horizons (Synth)                                    ⬡
+
+  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
+  │   Rust SDK           │  │   Python SDK         │  │   TypeScript SDK    │
+  │   (horizons-ai)      │  │   (horizons)         │  │   (@horizons-ai)   │
+Interfaces ───►          │  │                      │  │                     │
+  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘
+
+  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
+  │   Your Agents        │  │   Codex · Claude     │  │  Third-Party Agents │   Tenant
+  │   (custom)           │  │   OpenCode           │  │  (MCP / Archipelago)│   isolation,
+Agents ────►             │  │                      │  │                     │   approval
+  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘   gates,
+                                                                               audit trail,
+  ┌───────────────────────────────────────────────────────────────────────┐    ACLs
+  │             Evaluation, Optimization, and Continual Learning         │
+  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐               │    designed
+  │  │  RLM v1 (OSS)│  │  MIPRO v2    │  │  GEPA        │               │    for
+  │  │  reward       │  │  batch prompt│  │  reflective  │               │    governed
+  │  │  scoring      │  │  optimization│  │  evolution   │               │    and
+  │  └──────────────┘  └──────────────┘  └──────────────┘               │    regulated
+  │  ┌─────────────────────────────────────────────────────┐            │    work
+  │  │  Continual Learning                                 │            │
+  │  │  ontology-enhanced MIPRO · memory-informed cycles   │            │
+  │  └─────────────────────────────────────────────────────┘            │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │             Agent Execution                                          │
+  │  agent-sandbox (Docker) · MCP Gateway · Harbor inference             │
+  │  Voyager memory (graph + vector + summarization)                     │
+  │  Action propose / approve / deny                                     │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │             Business Context                                         │
+  │  Context Refresh (connectors, cron, incremental sync)                │
+  │  Graph engine (DAG) · Pipelines                                      │
+  │  On Board storage (Postgres · Turso · S3 · Redis · Helix graph)     │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │             Event Sync Layer                                         │
+  │  Bidirectional pub/sub · routing · retries · replay · DLQ            │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+                     Horizons sits as a sidecar to ↓
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │             Your Backend                                             │
+  │  Business logic · APIs · Databases · Auth · Queues                   │
+  │  The core application Horizons augments with AI agent capabilities   │
+  └───────────────────────────────────────────────────────────────────────┘
+
+               ┌─────────────────────────────────────┐
+               │       Your Systems of Record         │
+               │  Gmail · CRM · GitHub · Jira · S3    │
+               └─────────────────────────────────────┘

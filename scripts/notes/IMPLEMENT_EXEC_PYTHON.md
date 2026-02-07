@@ -18,7 +18,7 @@ Read these files before starting:
 
 | File | Why |
 |------|-----|
-| `Horizons/better_rlm.txt` | Full design doc — architecture, sandbox properties, open questions |
+| `scripts/notes/better_rlm.txt` | Full design doc — architecture, sandbox properties, open questions |
 | `testing/horizons-tests/mocked/tests/rlm_exec_python_scenarios.rs` | 11 integration test scenarios with test data fixtures |
 | `horizons_graph/src/rlm_v1/mod.rs` | Core types: `RlmRunRequest`, `LmClient`, `LmResponse`, `ToolCall`, `ToolExecutor` |
 | `horizons_graph/src/rlm_v1/tools/mod.rs` | `ToolExecutor` trait, `ToolResult`, `ToolRegistry`, `build_tool_registry()` |

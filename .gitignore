@@ -39,3 +39,6 @@ Thumbs.db
 
 # Tests live in the testing/ repo
 /tests/
+
+# Local dev state
+/.horizons_dev_admin_test/
