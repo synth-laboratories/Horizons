@@ -133,6 +133,11 @@ impl O11yConfig {
     pub fn from_env() -> Result<Self> {
         let mut cfg = Self::default();
 
+        // Track whether OTEL_* vars were explicitly set so that integration-specific
+        // convenience env vars (e.g. Laminar) can apply only as a fallback.
+        let mut otel_endpoint_set = false;
+        let mut otel_protocol_set = false;
+
         if let Ok(v) = std::env::var("OTEL_SERVICE_NAME") {
             if !v.trim().is_empty() {
                 cfg.service_name = v;
@@ -142,6 +147,7 @@ impl O11yConfig {
         if let Ok(v) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
             if !v.trim().is_empty() {
                 cfg.otlp_endpoint = Some(v);
+                otel_endpoint_set = true;
             }
         }
 
@@ -150,12 +156,92 @@ impl O11yConfig {
                 cfg.otlp_protocol = OtlpProtocol::parse(&v).ok_or_else(|| {
                     crate::Error::InvalidInput(format!("invalid OTEL_EXPORTER_OTLP_PROTOCOL: {v}"))
                 })?;
+                otel_protocol_set = true;
             }
         }
 
         if let Ok(v) = std::env::var("OTEL_EXPORTER_OTLP_HEADERS") {
             if !v.trim().is_empty() {
                 cfg.otlp_headers = parse_headers(&v)?;
+            }
+        }
+
+        // Laminar (lmnr) convenience support.
+        //
+        // Laminar supports OTLP ingestion. Horizons can talk to Laminar via the standard
+        // OTEL_* variables, but these env vars make self-host setups easier:
+        // - LMNR_PROJECT_API_KEY (official name in Laminar docs)
+        // - HORIZONS_LAMINAR_PROJECT_API_KEY (alias)
+        // - HORIZONS_LAMINAR_OTLP_ENDPOINT (OTLP base URL, e.g. http://localhost:8000)
+        // - HORIZONS_LAMINAR_OTLP_PROTOCOL ("http/protobuf" or "grpc")
+        // - HORIZONS_LAMINAR_SELF_HOSTED (bool; if true and no endpoint is set, defaults to http://localhost:8000)
+        //
+        // If OTEL_* vars are explicitly set, they take precedence.
+        fn parse_bool(v: &str) -> bool {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        }
+
+        let laminar_project_key = std::env::var("LMNR_PROJECT_API_KEY")
+            .ok()
+            .and_then(|v| (!v.trim().is_empty()).then_some(v))
+            .or_else(|| {
+                std::env::var("HORIZONS_LAMINAR_PROJECT_API_KEY")
+                    .ok()
+                    .and_then(|v| (!v.trim().is_empty()).then_some(v))
+            });
+
+        let laminar_self_hosted = std::env::var("HORIZONS_LAMINAR_SELF_HOSTED")
+            .ok()
+            .is_some_and(|v| parse_bool(&v));
+
+        let laminar_endpoint = std::env::var("HORIZONS_LAMINAR_OTLP_ENDPOINT")
+            .ok()
+            .and_then(|v| (!v.trim().is_empty()).then_some(v))
+            // Alias: some setups might prefer a shorter generic name.
+            .or_else(|| {
+                std::env::var("LMNR_OTLP_ENDPOINT")
+                    .ok()
+                    .and_then(|v| (!v.trim().is_empty()).then_some(v))
+            });
+
+        let laminar_protocol = std::env::var("HORIZONS_LAMINAR_OTLP_PROTOCOL")
+            .ok()
+            .and_then(|v| (!v.trim().is_empty()).then_some(v))
+            .map(|v| {
+                OtlpProtocol::parse(&v).ok_or_else(|| {
+                    crate::Error::InvalidInput(format!(
+                        "invalid HORIZONS_LAMINAR_OTLP_PROTOCOL: {v}"
+                    ))
+                })
+            })
+            .transpose()?;
+
+        let laminar_enabled = laminar_self_hosted || laminar_endpoint.is_some();
+
+        if laminar_enabled && !otel_endpoint_set {
+            if let Some(ep) = laminar_endpoint {
+                cfg.otlp_endpoint = Some(ep);
+            } else if laminar_self_hosted && laminar_project_key.is_some() {
+                cfg.otlp_endpoint = Some("http://localhost:8000".to_string());
+            }
+        }
+
+        if laminar_enabled && !otel_protocol_set {
+            if let Some(p) = laminar_protocol {
+                cfg.otlp_protocol = p;
+            }
+        }
+
+        // If Laminar is enabled, automatically add the Authorization header unless the user
+        // already provided one via OTEL_EXPORTER_OTLP_HEADERS.
+        if laminar_enabled {
+            if let Some(key) = laminar_project_key {
+                cfg.otlp_headers
+                    .entry("authorization".to_string())
+                    .or_insert_with(|| format!("Bearer {}", key.trim()));
             }
         }
 
