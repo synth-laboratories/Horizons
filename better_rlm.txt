@@ -1,0 +1,320 @@
+better_rlm: Self-Contained RLM with In-Process WASM + Monty Sandbox
+=====================================================================
+
+STATUS: scoping / design
+DATE:   2026-02-06
+
+0. PROBLEM
+----------
+
+RLM v1 has a split execution model:
+  - local_grep / local_search / view_lines → Rust in-process (fast, ~0.1ms)
+  - codex_exec → HTTP to Python backend → Docker/Daytona container → sandbox-agent
+
+The Docker path adds:
+  - Provisioning latency (container spin-up, sandbox-agent install, health check)
+  - External dependency on Docker daemon or Daytona API
+  - Python backend as middleman (GRAPH_TOOL_EXECUTOR_URL)
+  - Operational complexity (port mapping, cleanup, crash recovery)
+  - No deterministic resource metering (container could OOM, hang, etc.)
+
+For the RLM use case we don't need a full Linux environment. The LLM writes
+small data-processing scripts (grep, parse JSON, count, summarize). We want:
+  - In-process execution (no container provisioning)
+  - Memory isolation (buggy LLM code can't corrupt host)
+  - Deterministic limits (time, memory, instruction count)
+  - Fast cold start (<1ms, not 10-30s)
+  - No external infrastructure dependencies
+
+
+1. TARGET ARCHITECTURE
+----------------------
+
+                    ┌────────────────────────────────────┐
+                    │         RLM v2 Runner (Rust)        │
+                    │                                     │
+                    │  ┌──────────────────────────────┐   │
+                    │  │  Tier 1: Rust-native tools    │   │
+                    │  │  (grep, search, view_lines)   │   │
+                    │  │  Unchanged from v1             │   │
+                    │  └──────────────────────────────┘   │
+                    │                                     │
+                    │  ┌──────────────────────────────┐   │
+                    │  │  Tier 2: Monty micro-sandbox  │   │
+                    │  │  (Python exec, data analysis)  │   │
+                    │  │  In-process, memory-isolated   │   │
+                    │  └──────────────────────────────┘   │
+                    │                                     │
+                    │  ┌──────────────────────────────┐   │
+                    │  │  Tier 3: wasmtime sandbox     │   │
+                    │  │  (compiled WASM modules,       │   │
+                    │  │   general compute, future)     │   │
+                    │  └──────────────────────────────┘   │
+                    │                                     │
+                    │  ┌──────────────────────────────┐   │
+                    │  │  Tier 4: Docker/Daytona       │   │
+                    │  │  (escape hatch: full Linux)    │   │
+                    │  │  Only when explicitly needed   │   │
+                    │  └──────────────────────────────┘   │
+                    └────────────────────────────────────┘
+
+The default path is Tier 1 + Tier 2. Tier 3 is for future extensibility
+(user-provided WASM plugins, compiled analysis kernels). Tier 4 remains
+as an escape hatch but is no longer the default for code execution.
+
+
+2. TIER 2: MONTY MICRO-SANDBOX (primary new work)
+--------------------------------------------------
+
+Replace `codex_exec` (Docker shell) with a new `exec_python` tool that runs
+LLM-generated Python inside Monty, in-process.
+
+2a. New tool: exec_python
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    {
+      "name": "exec_python",
+      "description": "Execute Python code in a sandboxed interpreter. Has access
+        to `context` variable (the materialized data), `llm_query(prompt)` for
+        sub-LM calls, and standard Python builtins. No filesystem, no network.",
+      "parameters": {
+        "code": { "type": "string" },
+        "timeout_ms": { "type": "integer" }
+      }
+    }
+
+2b. Sandbox properties
+~~~~~~~~~~~~~~~~~~~~~~
+
+    - Memory:     Monty runs in-process with Rust-managed allocations.
+                  Cap via a custom Monty allocator or pre/post size checks.
+                  Target: 64MB per execution.
+
+    - Time:       Monty's NoLimitTracker → replace with a FuelTracker or
+                  wall-clock timeout via tokio::time::timeout wrapping the
+                  synchronous Monty::run call (spawn_blocking + timeout).
+
+    - Filesystem: None. Monty has no fs access by default (already true).
+
+    - Network:    None. Monty has no network access (already true).
+
+    - Imports:    Limited stdlib only (json, re, math, collections,
+                  itertools, functools, string, datetime). No pip packages.
+
+    - Injected:   `context` (str or parsed object from materialized files),
+                  `llm_query(prompt) -> str` (host callback for sub-LM calls),
+                  `print()` (captured to stdout buffer).
+
+2c. Host callbacks (Monty → Rust)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Monty supports custom builtins. We inject:
+
+    llm_query(prompt: str) -> str
+        Calls back into the RLM runner's LmClient to make a sub-LM call.
+        Implementation: Monty calls a Rust function pointer. Since Monty::run
+        is synchronous, the callback needs to bridge to async (block_on or
+        channel-based). Options:
+
+        Option A: Run Monty in spawn_blocking, callback uses a oneshot channel
+                  to request LLM call from the async runtime, blocks waiting
+                  for the response.
+
+        Option B: Run Monty in spawn_blocking, callback uses
+                  tokio::runtime::Handle::block_on to call the async LmClient.
+
+        Preference: Option A (cleaner separation, avoids nested runtime issues).
+
+    FINAL_VAR(name: str) -> str
+        Returns a variable from the Monty namespace as the answer.
+        (Same pattern as open-source RLM.)
+
+2d. Context injection
+~~~~~~~~~~~~~~~~~~~~~
+
+Before executing LLM code, the sandbox:
+  1. Checks LocalToolState for materialized files
+  2. Injects the content as `context` variable (str for text, parsed for JSON)
+  3. Optionally injects `context_0`, `context_1`, etc. for multi-file scenarios
+
+This replaces the open-source RLM's approach of writing to temp files +
+exec'ing file-read code. We skip the filesystem entirely.
+
+2e. Output capture
+~~~~~~~~~~~~~~~~~~
+
+    - stdout: Captured via Monty's StdPrint callback → buffer
+    - stderr: Captured via Monty's exception handling
+    - Return value: The final expression result (Monty REPL mode)
+    - Variables: Extracted from Monty namespace post-execution
+
+    Tool result returned to LLM:
+    {
+      "stdout": "...",
+      "return_value": "...",
+      "error": null,          // or exception message
+      "execution_time_ms": 12,
+      "variables": ["x", "results", "summary"]
+    }
+
+2f. State persistence across iterations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Like the open-source RLM, variables persist across exec_python calls within
+one RLM run. Implementation: keep the Monty namespace alive between calls
+(don't re-create the interpreter each iteration).
+
+This means the LLM can:
+  - Iteration 1: `results = [line for line in context.split('\n') if 'ERROR' in line]`
+  - Iteration 2: `summary = llm_query(f"Summarize: {results[:10]}")`
+  - Iteration 3: `submit_answer(summary)`
+
+
+3. TIER 3: WASMTIME SANDBOX (future / extensibility)
+-----------------------------------------------------
+
+For compiled analysis kernels, user-provided plugins, or when Monty's
+limited stdlib isn't enough.
+
+3a. Runtime choice: wasmtime
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    - Epoch interruption for time limits (check every N wasm instructions)
+    - Fuel metering for deterministic instruction counting
+    - Memory limits via wasmtime::Config::max_memory_size
+    - WASI capability model: grant only what's needed (clock_get? maybe. fs? no.)
+    - Component model for structured host↔guest interfaces
+
+3b. Guest compilation
+~~~~~~~~~~~~~~~~~~~~~
+
+    - Python → WASM: not practical today (CPython is huge; micropython-wasm
+      exists but limited)
+    - Rust → WASM: user writes Rust plugins compiled to wasm32-wasi
+    - JS → WASM: via wizer/javy if we ever want JS policy code
+    - Primary use: pre-compiled analysis modules, not LLM-generated code
+
+3c. Host functions exposed to WASM guests
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    - read_context(id) -> bytes      // read materialized file content
+    - llm_query(prompt) -> string    // sub-LM call
+    - write_output(bytes)            // write result
+    - log(message)                   // debug logging
+
+3d. When to use Tier 3 vs Tier 2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    Tier 2 (Monty):  LLM writes Python on the fly. Data exploration,
+                     string processing, JSON parsing, simple analysis.
+                     This is 95% of RLM use cases.
+
+    Tier 3 (WASM):   Pre-compiled modules. Heavy computation, custom
+                     algorithms, user-provided plugins. Future work.
+
+
+4. MIGRATION PLAN
+-----------------
+
+Phase 1: Monty sandbox tool (HIGH PRIORITY)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    Goal: exec_python tool using Monty, fully in-process.
+    Scope:
+      [ ] Enable monty feature by default in horizons_graph
+      [ ] Create rlm_v1/tools/python_sandbox.rs
+          - MontyREPL struct (wraps Monty interpreter state)
+          - execute_python(code, context, timeout) -> REPLResult
+          - Host callback bridge for llm_query
+      [ ] Add exec_python to builtin_tools()
+      [ ] Wire exec_python into DefaultToolExecutor (Rust-native path,
+          not execute_remote)
+      [ ] Timeout: tokio::spawn_blocking + tokio::time::timeout
+      [ ] Memory: track Monty allocation size, abort if > 64MB
+      [ ] State persistence: MontyREPL lives for duration of run_rlm()
+      [ ] Tests: basic exec, timeout, memory limit, llm_query callback,
+          multi-iteration state persistence
+
+    Estimated effort: 3-5 days
+
+Phase 2: Deprecate codex_exec for RLM (MEDIUM)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    Goal: exec_python is the default; codex_exec removed from RLM tool set.
+    Scope:
+      [ ] Remove codex_exec from builtin_tools() (or gate behind capability)
+      [ ] Update RLM system prompt to teach exec_python patterns
+      [ ] Update tool_capabilities: exec_python gets "compute" capability
+      [ ] Benchmark: compare RLM solve rate with exec_python vs codex_exec
+          on existing eval suite
+      [ ] Keep codex_exec available for non-RLM graph nodes (backward compat)
+
+    Estimated effort: 2-3 days
+
+Phase 3: wasmtime integration (FUTURE)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    Goal: WASM sandbox for compiled modules.
+    Scope:
+      [ ] Add wasmtime dependency (optional feature)
+      [ ] Create rlm_v1/tools/wasm_sandbox.rs
+          - WasmREPL struct
+          - Host function imports (read_context, llm_query, etc.)
+          - Epoch interruption + fuel metering
+      [ ] Add exec_wasm tool or plugin-loading mechanism
+      [ ] Define WASI capability policy
+
+    Estimated effort: 5-8 days
+    Prerequisite: clear use case that Monty can't serve
+
+
+5. OPEN QUESTIONS
+-----------------
+
+Q1: Monty maturity
+    The Cargo.toml comment says "intentionally off-by-default until the Monty
+    Rust API stabilizes." Current status? Do we need to vendor/fork?
+    → Check pydantic/monty repo for recent activity and API stability.
+
+Q2: Monty stdlib coverage
+    For RLM data analysis, we need at minimum: json, re, collections,
+    itertools, math, string, datetime. Which of these does Monty support?
+    → Audit Monty's supported modules. If gaps, we may need to implement
+    host-provided versions.
+
+Q3: Async bridge for llm_query callback
+    Monty::run() is synchronous. The LmClient is async. Best bridge pattern?
+    → Prototype Option A (oneshot channel from spawn_blocking thread).
+    → Measure latency overhead of the bridge.
+
+Q4: Multi-file context
+    Current RLM materializes files individually. exec_python needs access to
+    all materialized files. Inject as dict? Separate variables?
+    → Start with: inject `files` dict mapping filename → content.
+    → Also inject `context` as alias for the primary input.
+
+Q5: Batched llm_query
+    Open-source RLM v1 has llm_query_batched for concurrent sub-calls.
+    Do we need this in Monty? Implementation is harder since Monty is
+    single-threaded.
+    → Phase 1: single llm_query only. Phase 2: collect batch requests
+    and execute them concurrently when Monty yields.
+
+Q6: codex_exec parity
+    Some RLM tasks may genuinely need shell (git, file manipulation).
+    Is exec_python sufficient for the verifier use case?
+    → Audit current codex_exec usage in RLM runs. If it's mostly
+    grep/awk/python one-liners, exec_python covers it. If it needs
+    git/docker, keep Tier 4 as escape hatch.
+
+
+6. SUCCESS CRITERIA
+-------------------
+
+    - exec_python cold start: <5ms (vs 10-30s for Docker container)
+    - No external dependencies: no Docker, no Python backend, no network
+    - Memory-safe: buggy LLM code can't crash the Rust process
+    - Time-bounded: deterministic timeout enforcement
+    - Eval parity: RLM solve rate on existing benchmarks >= v1 with codex_exec
+    - Single binary: horizons_graph ships exec_python without requiring
+      any sidecar services
