@@ -23,17 +23,17 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ${{ github.repository == 'synth-laboratories/Horizons' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-            archive: tar.gz
+            os: linux
           - target: aarch64-unknown-linux-gnu
             runner: ${{ github.repository == 'synth-laboratories/Horizons' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-            archive: tar.gz
+            os: linux
             cross: true
           - target: x86_64-apple-darwin
-            runner: macos-13
-            archive: tar.gz
+            runner: macos-14
+            os: macos
           - target: aarch64-apple-darwin
             runner: macos-14
-            archive: tar.gz
+            os: macos
 
     steps:
       - uses: actions/checkout@v4
@@ -62,10 +62,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev protobuf-compiler clang libclang-dev cmake
 
-      - name: Build
+      - name: Build (Linux)
+        if: matrix.os == 'linux'
         env:
-          # For aarch64-linux cross compilation
+          # Allow duplicate SQLite symbols from libsqlite3-sys and libsql-ffi
+          RUSTFLAGS: "-C link-args=-Wl,--allow-multiple-definition"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p horizons_server --features ${{ env.FEATURES }}
+
+      - name: Build (macOS)
+        if: matrix.os == 'macos'
         run: |
           cargo build --release --target ${{ matrix.target }} \
             -p horizons_server --features ${{ env.FEATURES }}
@@ -81,7 +89,6 @@ jobs:
 
           mkdir -p "staging/${ARCHIVE_NAME}"
           cp "target/${{ matrix.target }}/release/${BIN}" "staging/${ARCHIVE_NAME}/horizons"
-          # Include the license if present
           [ -f LICENSE.md ] && cp LICENSE.md "staging/${ARCHIVE_NAME}/"
 
           cd staging
@@ -98,6 +105,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
