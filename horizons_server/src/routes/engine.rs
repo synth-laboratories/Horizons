@@ -12,6 +12,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Extension, Json};
 use futures_util::{StreamExt, stream::Stream};
+use horizons_core::Error as CoreError;
 use horizons_core::engine::models::{AgentKind, PermissionMode, SandboxConfig};
 use horizons_core::engine::sandbox_agent_client::SandboxAgentClient;
 use serde::{Deserialize, Serialize};
@@ -136,6 +137,31 @@ pub fn router() -> axum::Router {
 // Handlers
 // ---------------------------------------------------------------------------
 
+fn not_found_run(handle_id: &str) -> ApiError {
+    ApiError::Core(CoreError::NotFound(format!(
+        "sandbox run not found: {handle_id}"
+    )))
+}
+
+fn require_run_for_org(
+    runtime: &horizons_core::engine::sandbox_runtime::SandboxRuntime,
+    org_id: &horizons_core::models::OrgId,
+    handle_id: &str,
+) -> Result<horizons_core::engine::sandbox_runtime::ActiveSandboxRun, ApiError> {
+    let run = runtime
+        .get_active(handle_id)
+        .ok_or_else(|| not_found_run(handle_id))?;
+
+    // Org-level authorization: avoid handle-based cross-tenant access by ensuring the
+    // caller's org matches the tracked run's org. Return 404 on mismatch to reduce
+    // handle enumeration surface area.
+    if run.org_id != org_id.to_string() {
+        return Err(not_found_run(handle_id));
+    }
+
+    Ok(run)
+}
+
 /// POST /api/v1/engine/run
 ///
 /// One-shot: provision sandbox, run agent, collect results, release.
@@ -240,7 +266,7 @@ async fn start_engine(
 /// SSE stream of events from a running sandbox agent session.
 #[tracing::instrument(level = "info", skip_all)]
 async fn events_sse(
-    OrgIdHeader(_org_id): OrgIdHeader,
+    OrgIdHeader(org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
     Query(q): Query<EventsQuery>,
@@ -249,11 +275,7 @@ async fn events_sse(
         .sandbox_runtime
         .as_ref()
         .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
-    let run = runtime.get_active(&handle_id).ok_or_else(|| {
-        ApiError::Core(horizons_core::Error::NotFound(format!(
-            "sandbox run not found: {handle_id}"
-        )))
-    })?;
+    let run = require_run_for_org(runtime, &org_id, &handle_id)?;
 
     let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
@@ -309,7 +331,7 @@ async fn events_sse(
 /// Send a follow-up message to an existing tracked sandbox session.
 #[tracing::instrument(level = "info", skip_all)]
 async fn send_message(
-    OrgIdHeader(_org_id): OrgIdHeader,
+    OrgIdHeader(org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
     Json(req): Json<SendMessageRequest>,
@@ -318,11 +340,7 @@ async fn send_message(
         .sandbox_runtime
         .as_ref()
         .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
-    let run = runtime.get_active(&handle_id).ok_or_else(|| {
-        ApiError::Core(horizons_core::Error::NotFound(format!(
-            "sandbox run not found: {handle_id}"
-        )))
-    })?;
+    let run = require_run_for_org(runtime, &org_id, &handle_id)?;
 
     let msg = req.message.trim();
     if msg.is_empty() {
@@ -346,7 +364,7 @@ async fn send_message(
 /// Release a sandbox by its handle.
 #[tracing::instrument(level = "info", skip_all)]
 async fn release_engine(
-    OrgIdHeader(_org_id): OrgIdHeader,
+    OrgIdHeader(org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -355,6 +373,8 @@ async fn release_engine(
         .as_ref()
         .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
 
+    // Enforce org-level authorization on handle-scoped release.
+    let _run = require_run_for_org(runtime, &org_id, &handle_id)?;
     runtime.release_run(&handle_id).await?;
 
     Ok(Json(serde_json::json!({
@@ -368,7 +388,7 @@ async fn release_engine(
 /// Check if the sandbox-agent in the container is healthy.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn health_engine(
-    OrgIdHeader(_org_id): OrgIdHeader,
+    OrgIdHeader(org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
 ) -> Result<Json<HealthResponse>, ApiError> {
@@ -376,11 +396,7 @@ async fn health_engine(
         .sandbox_runtime
         .as_ref()
         .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
-    let run = runtime.get_active(&handle_id).ok_or_else(|| {
-        ApiError::Core(horizons_core::Error::NotFound(format!(
-            "sandbox run not found: {handle_id}"
-        )))
-    })?;
+    let run = require_run_for_org(runtime, &org_id, &handle_id)?;
 
     let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
     let healthy = client.health().await.unwrap_or(false);
