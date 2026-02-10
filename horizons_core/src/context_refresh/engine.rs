@@ -152,6 +152,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS hce_org_dedupe_key
   ON horizons_context_entities(org_id, dedupe_key);
 CREATE INDEX IF NOT EXISTS hce_org_updated_at
   ON horizons_context_entities(org_id, updated_at);
+-- Query-pattern indexes used by downstream apps (OpenRevenue/Internal/etc).
+CREATE INDEX IF NOT EXISTS hce_org_source_updated_at
+  ON horizons_context_entities(org_id, source, updated_at);
+CREATE INDEX IF NOT EXISTS hce_org_entity_type_updated_at
+  ON horizons_context_entities(org_id, entity_type, updated_at);
+CREATE INDEX IF NOT EXISTS hce_org_source_source_id
+  ON horizons_context_entities(org_id, source, source_id);
+
+-- Stable, versioned read contract for context entities.
+--
+-- Apps should query this view (not the base table) so we can evolve the
+-- underlying storage without forcing downstream SQL changes.
+DROP VIEW IF EXISTS horizons_v1_context_entities;
+CREATE VIEW horizons_v1_context_entities AS
+  SELECT
+    id,
+    org_id,
+    entity_type,
+    content,
+    source,
+    source_id,
+    dedupe_key,
+    acl,
+    created_at,
+    updated_at
+  FROM horizons_context_entities;
 "#;
 
         // `execute` is per-statement in most backends; split conservatively.
@@ -319,10 +345,7 @@ ON CONFLICT(org_id, dedupe_key) DO UPDATE SET
                 }
 
                 let output = step.output.clone().unwrap_or(serde_json::Value::Null);
-                let entities_val = output
-                    .get("entities")
-                    .cloned()
-                    .unwrap_or(output.clone());
+                let entities_val = output.get("entities").cloned().unwrap_or(output.clone());
                 let arr = entities_val.as_array().ok_or_else(|| {
                     Error::InvalidInput(
                         "pipeline entities output must be an array or {\"entities\": [...]}"
@@ -339,30 +362,27 @@ ON CONFLICT(org_id, dedupe_key) DO UPDATE SET
                         ))
                     })?;
 
-                    let entity_type = obj
-                        .get("entity_type")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            Error::InvalidInput(format!(
-                                "pipeline entity at index {idx} missing entity_type"
-                            ))
-                        })?;
-                    let content = obj
-                        .get("content")
-                        .cloned()
-                        .ok_or_else(|| {
-                            Error::InvalidInput(format!(
-                                "pipeline entity at index {idx} missing content"
-                            ))
-                        })?;
-                    let dedupe_key = obj
-                        .get("dedupe_key")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            Error::InvalidInput(format!(
-                                "pipeline entity at index {idx} missing dedupe_key"
-                            ))
-                        })?;
+                    let entity_type =
+                        obj.get("entity_type")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                Error::InvalidInput(format!(
+                                    "pipeline entity at index {idx} missing entity_type"
+                                ))
+                            })?;
+                    let content = obj.get("content").cloned().ok_or_else(|| {
+                        Error::InvalidInput(format!(
+                            "pipeline entity at index {idx} missing content"
+                        ))
+                    })?;
+                    let dedupe_key =
+                        obj.get("dedupe_key")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                Error::InvalidInput(format!(
+                                    "pipeline entity at index {idx} missing dedupe_key"
+                                ))
+                            })?;
                     let source_id = obj
                         .get("source_id")
                         .and_then(|v| v.as_str())
@@ -512,7 +532,14 @@ impl ContextRefresh for ContextRefreshEngine {
         let records_pulled = records.len() as u64;
 
         let entities = self
-            .process_records(identity, org_id, &source, connector.clone(), records, &resolved_source)
+            .process_records(
+                identity,
+                org_id,
+                &source,
+                connector.clone(),
+                records,
+                &resolved_source,
+            )
             .await?;
 
         // Store.
@@ -633,18 +660,22 @@ impl ContextRefresh for ContextRefreshEngine {
     }
 }
 
-fn inject_project_db_handle_into_pipeline_agents(spec: &mut PipelineSpec, handle: &crate::models::ProjectDbHandle) {
+fn inject_project_db_handle_into_pipeline_agents(
+    spec: &mut PipelineSpec,
+    handle: &crate::models::ProjectDbHandle,
+) {
     for step in spec.steps.iter_mut() {
         if let StepKind::Agent { spec: agent_spec } = &mut step.kind {
             // Mirror the convenience behavior in `horizons_server/src/routes/pipelines.rs`.
             if let serde_json::Value::Object(m) = &mut agent_spec.context {
                 m.entry("_project_db_handle".to_string())
-                    .or_insert_with(|| serde_json::to_value(handle).unwrap_or(serde_json::Value::Null));
+                    .or_insert_with(|| {
+                        serde_json::to_value(handle).unwrap_or(serde_json::Value::Null)
+                    });
             } else if agent_spec.context.is_null() {
                 agent_spec.context = serde_json::json!({ "_project_db_handle": handle });
             } else {
-                agent_spec.context =
-                    serde_json::json!({ "_project_db_handle": handle, "context": agent_spec.context });
+                agent_spec.context = serde_json::json!({ "_project_db_handle": handle, "context": agent_spec.context });
             }
         }
     }

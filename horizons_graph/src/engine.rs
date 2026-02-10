@@ -356,7 +356,10 @@ impl GraphEngine {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| GraphError::bad_request("python_function missing fn_str"))?;
                 let mut args = serde_json::Map::new();
-                args.insert("mode".to_string(), Value::String("python_function".to_string()));
+                args.insert(
+                    "mode".to_string(),
+                    Value::String("python_function".to_string()),
+                );
                 args.insert("fn_str".to_string(), Value::String(fn_str.to_string()));
                 args.insert("inputs".to_string(), inputs.clone());
                 args.insert("state".to_string(), full_state.clone());

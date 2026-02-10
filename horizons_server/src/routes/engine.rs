@@ -7,6 +7,7 @@ use crate::error::ApiError;
 use crate::extract::OrgIdHeader;
 use crate::server::AppState;
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Extension, Json};
@@ -18,6 +19,35 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
+
+fn inherit_env_if_missing(env_vars: &mut HashMap<String, String>, key: &str) {
+    if env_vars.contains_key(key) {
+        return;
+    }
+    if let Ok(v) = std::env::var(key) {
+        let t = v.trim();
+        if !t.is_empty() {
+            env_vars.insert(key.to_string(), t.to_string());
+        }
+    }
+}
+
+fn inject_common_llm_env(env_vars: &mut HashMap<String, String>) {
+    // Keep this conservative. The intent is dev ergonomics: let the server's environment
+    // supply keys so callers (like Dhakka UI) don't have to paste secrets into requests.
+    for k in [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_ORG_ID",
+        "OPENAI_PROJECT_ID",
+        "ANTHROPIC_API_KEY",
+        "GROQ_API_KEY",
+        "GOOGLE_API_KEY",
+        "GRAPH_LLM_API_KEY",
+    ] {
+        inherit_env_if_missing(env_vars, k);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -76,6 +106,17 @@ pub struct HealthResponse {
     pub healthy: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    #[serde(default)]
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendMessageRequest {
+    pub message: String,
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -86,6 +127,7 @@ pub fn router() -> axum::Router {
         .route("/engine/run", post(run_engine))
         .route("/engine/start", post(start_engine))
         .route("/engine/{handle_id}/events", get(events_sse))
+        .route("/engine/{handle_id}/message", post(send_message))
         .route("/engine/{handle_id}/release", post(release_engine))
         .route("/engine/{handle_id}/health", get(health_engine))
 }
@@ -119,6 +161,7 @@ async fn run_engine(
             }
         }
     }
+    inject_common_llm_env(&mut env_vars);
 
     let config = SandboxConfig {
         agent: req.agent,
@@ -168,6 +211,7 @@ async fn start_engine(
             }
         }
     }
+    inject_common_llm_env(&mut env_vars);
 
     let config = SandboxConfig {
         agent: req.agent,
@@ -199,6 +243,7 @@ async fn events_sse(
     OrgIdHeader(_org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
+    Query(q): Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>> + Send>, ApiError> {
     let runtime = state
         .sandbox_runtime
@@ -214,7 +259,7 @@ async fn events_sse(
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     tokio::spawn(async move {
-        let mut offset: u64 = 0;
+        let mut offset: u64 = q.offset.unwrap_or(0);
 
         loop {
             match client.fetch_events(&run.session_id, offset).await {
@@ -257,6 +302,43 @@ async fn events_sse(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// POST /api/v1/engine/:handle_id/message
+///
+/// Send a follow-up message to an existing tracked sandbox session.
+#[tracing::instrument(level = "info", skip_all)]
+async fn send_message(
+    OrgIdHeader(_org_id): OrgIdHeader,
+    Extension(state): Extension<Arc<AppState>>,
+    Path(handle_id): Path<String>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let runtime = state
+        .sandbox_runtime
+        .as_ref()
+        .ok_or_else(|| ApiError::InvalidInput("sandbox runtime not configured".to_string()))?;
+    let run = runtime.get_active(&handle_id).ok_or_else(|| {
+        ApiError::Core(horizons_core::Error::NotFound(format!(
+            "sandbox run not found: {handle_id}"
+        )))
+    })?;
+
+    let msg = req.message.trim();
+    if msg.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "invalid input: missing message".to_string(),
+        ));
+    }
+
+    let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
+    client.send_message(&run.session_id, msg).await?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "handle_id": handle_id,
+        "session_id": run.session_id,
+    })))
 }
 
 /// POST /api/v1/engine/:handle_id/release

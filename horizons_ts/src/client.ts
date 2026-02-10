@@ -8,13 +8,22 @@ export interface ClientOptions {
   apiKey?: string;
 }
 
+/** Error returned for non-2xx Horizons API responses. */
 export class HorizonsError extends Error {
   constructor(message: string, readonly status?: number) {
     super(message);
   }
 }
 
+/** Shared HTTP client for all Horizons TypeScript API modules. */
 export class HorizonsClient {
+  /**
+   * Create a new client.
+   *
+   * @param baseUrl Base URL for your Horizons deployment.
+   * @param orgId Tenant organization UUID.
+   * @param opts Optional request identity/auth headers.
+   */
   constructor(readonly baseUrl: string, readonly orgId: UUID, readonly opts: ClientOptions = {}) {}
 
   private headers(extra?: Record<string, string>): HeadersInit {
@@ -27,6 +36,7 @@ export class HorizonsClient {
     return { ...headers, ...extra };
   }
 
+  /** Execute an HTTP request and parse JSON response payload. */
   async request<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
     const resp = await fetch(`${this.baseUrl}${path}`, {
       ...init,
@@ -41,6 +51,12 @@ export class HorizonsClient {
     return data;
   }
 
+  /**
+   * Open an EventSource stream.
+   *
+   * Note: for agent chat streams prefer `AgentsAPI.chatStream()`, which uses
+   * POST + SSE parsing and aligns with Horizons chat endpoints.
+   */
   sse(path: string, body: unknown, onMessage: (event: MessageEvent) => void): EventSource {
     const url = `${this.baseUrl}${path}`;
     const payload = JSON.stringify(body ?? {});

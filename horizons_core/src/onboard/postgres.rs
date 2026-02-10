@@ -4,8 +4,9 @@ use crate::context_refresh::models::{
 use crate::models::{AgentIdentity, AuditEntry, OrgId, PlatformConfig, ProjectDbHandle, ProjectId};
 use crate::onboard::config::PostgresConfig;
 use crate::onboard::models::{
-    ApiKeyRecord, AuditQuery, ConnectorCredential, ListQuery, OperationRecord, OperationRunRecord,
-    OrgRecord, ResourceRecord, SyncState, SyncStateKey, UserRecord, UserRole,
+    ApiKeyRecord, AuditQuery, ConnectorCredential, CoreAgentEventCursor, CoreAgentRecord,
+    ListQuery, OperationRecord, OperationRunRecord, OrgRecord, ProjectRecord, ResourceRecord,
+    SyncState, SyncStateKey, UserRecord, UserRole,
 };
 use crate::onboard::traits::CentralDb;
 use crate::{Error, Result};
@@ -51,7 +52,11 @@ impl PostgresCentralDb {
         //
         // Postgres does not allow multiple SQL statements in a prepared statement, and
         // `sqlx::query(...)` prepares the query. Split on ';' like `project_db_migrate`.
-        for stmt in MIGRATION_0001.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        for stmt in MIGRATION_0001
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             sqlx::query(stmt)
                 .execute(&self.pool)
                 .await
@@ -97,6 +102,24 @@ impl PostgresCentralDb {
                     .map_err(|e| Error::backend("org_id", e))?,
             ),
             name: row.try_get("name").map_err(|e| Error::backend("name", e))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| Error::backend("created_at", e))?,
+        })
+    }
+
+    #[tracing::instrument(level = "debug", skip(row))]
+    fn project_from_row(row: &PgRow) -> Result<ProjectRecord> {
+        Ok(ProjectRecord {
+            org_id: OrgId(
+                row.try_get::<Uuid, _>("org_id")
+                    .map_err(|e| Error::backend("org_id", e))?,
+            ),
+            project_id: ProjectId(
+                row.try_get::<Uuid, _>("project_id")
+                    .map_err(|e| Error::backend("project_id", e))?,
+            ),
+            slug: row.try_get("slug").map_err(|e| Error::backend("slug", e))?,
             created_at: row
                 .try_get("created_at")
                 .map_err(|e| Error::backend("created_at", e))?,
@@ -472,6 +495,24 @@ impl CentralDb for PostgresCentralDb {
         Ok(row.as_ref().map(Self::org_from_row).transpose()?)
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn list_orgs(&self, query: ListQuery) -> Result<Vec<OrgRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT org_id, name, created_at
+            FROM orgs
+            ORDER BY created_at DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::backend("list orgs", e))?;
+        rows.iter().map(Self::org_from_row).collect()
+    }
+
     #[tracing::instrument(level = "debug", skip(self, user))]
     async fn upsert_user(&self, user: &UserRecord) -> Result<()> {
         sqlx::query(
@@ -530,6 +571,80 @@ impl CentralDb for PostgresCentralDb {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             out.push(Self::user_from_row(&r)?);
+        }
+        Ok(out)
+    }
+
+    async fn upsert_project(&self, project: &ProjectRecord) -> Result<()> {
+        if project.slug.trim().is_empty() {
+            return Err(Error::InvalidInput("project slug is empty".to_string()));
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO projects (org_id, project_id, slug, created_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (org_id, project_id) DO UPDATE
+              SET slug = EXCLUDED.slug
+            "#,
+        )
+        .bind(project.org_id.0)
+        .bind(project.project_id.0)
+        .bind(project.slug.trim())
+        .bind(project.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("upsert project", e))?;
+        Ok(())
+    }
+
+    async fn get_project_by_id(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+    ) -> Result<Option<ProjectRecord>> {
+        let row = sqlx::query(
+            "SELECT org_id, project_id, slug, created_at FROM projects WHERE org_id = $1 AND project_id = $2",
+        )
+        .bind(org_id.0)
+        .bind(project_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::backend("get project by id", e))?;
+        Ok(row.as_ref().map(Self::project_from_row).transpose()?)
+    }
+
+    async fn get_project_by_slug(&self, org_id: OrgId, slug: &str) -> Result<Option<ProjectRecord>> {
+        let row = sqlx::query(
+            "SELECT org_id, project_id, slug, created_at FROM projects WHERE org_id = $1 AND slug = $2",
+        )
+        .bind(org_id.0)
+        .bind(slug.trim())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::backend("get project by slug", e))?;
+        Ok(row.as_ref().map(Self::project_from_row).transpose()?)
+    }
+
+    async fn list_projects(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<ProjectRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT org_id, project_id, slug, created_at
+            FROM projects
+            WHERE org_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::backend("list projects", e))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(Self::project_from_row(&r)?);
         }
         Ok(out)
     }
@@ -997,6 +1112,305 @@ impl CentralDb for PostgresCentralDb {
             out.push(Self::operation_run_from_row(&r)?);
         }
         Ok(out)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, agent))]
+    async fn upsert_core_agent(&self, agent: &CoreAgentRecord) -> Result<()> {
+        let schedule_type = agent.schedule.as_ref().map(|s| match s {
+            crate::core_agents::models::AgentSchedule::Cron(_) => "cron",
+            crate::core_agents::models::AgentSchedule::Interval { .. } => "interval",
+            crate::core_agents::models::AgentSchedule::OnEvent { .. } => "on_event",
+            crate::core_agents::models::AgentSchedule::OnDemand => "on_demand",
+        });
+
+        sqlx::query(
+            r#"
+            INSERT INTO core_agents
+              (org_id, project_id, agent_id, name, sandbox_image, tools, schedule_type, schedule, enabled, next_run_at, config, created_at, updated_at)
+            VALUES
+              ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11::jsonb, $12, $13)
+            ON CONFLICT (org_id, project_id, agent_id) DO UPDATE
+              SET name = EXCLUDED.name,
+                  sandbox_image = EXCLUDED.sandbox_image,
+                  tools = EXCLUDED.tools,
+                  schedule_type = EXCLUDED.schedule_type,
+                  schedule = EXCLUDED.schedule,
+                  enabled = EXCLUDED.enabled,
+                  next_run_at = EXCLUDED.next_run_at,
+                  config = EXCLUDED.config,
+                  updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(agent.org_id.0)
+        .bind(agent.project_id.0)
+        .bind(&agent.agent_id)
+        .bind(&agent.name)
+        .bind(&agent.sandbox_image)
+        .bind(sqlx::types::Json(&agent.tools))
+        .bind(schedule_type)
+        .bind(sqlx::types::Json(&agent.schedule))
+        .bind(agent.enabled)
+        .bind(agent.next_run_at)
+        .bind(sqlx::types::Json(&agent.config))
+        .bind(agent.created_at)
+        .bind(agent.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("upsert core agent", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn get_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> Result<Option<CoreAgentRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT org_id, project_id, agent_id, name, sandbox_image, tools, schedule, enabled, next_run_at, config, created_at, updated_at
+              FROM core_agents
+             WHERE org_id = $1 AND project_id = $2 AND agent_id = $3
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(project_id.0)
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::backend("get core agent", e))?;
+
+        let Some(row) = row else { return Ok(None) };
+        let tools: sqlx::types::Json<Vec<String>> = row
+            .try_get("tools")
+            .map_err(|e| Error::backend("tools", e))?;
+        let schedule: sqlx::types::Json<Option<crate::core_agents::models::AgentSchedule>> = row
+            .try_get("schedule")
+            .map_err(|e| Error::backend("schedule", e))?;
+        let config: sqlx::types::Json<serde_json::Value> = row
+            .try_get("config")
+            .map_err(|e| Error::backend("config", e))?;
+
+        Ok(Some(CoreAgentRecord {
+            org_id: OrgId(
+                row.try_get::<Uuid, _>("org_id")
+                    .map_err(|e| Error::backend("org_id", e))?,
+            ),
+            project_id: ProjectId(
+                row.try_get::<Uuid, _>("project_id")
+                    .map_err(|e| Error::backend("project_id", e))?,
+            ),
+            agent_id: row
+                .try_get("agent_id")
+                .map_err(|e| Error::backend("agent_id", e))?,
+            name: row.try_get("name").map_err(|e| Error::backend("name", e))?,
+            sandbox_image: row
+                .try_get("sandbox_image")
+                .map_err(|e| Error::backend("sandbox_image", e))?,
+            tools: tools.0,
+            schedule: schedule.0,
+            enabled: row
+                .try_get("enabled")
+                .map_err(|e| Error::backend("enabled", e))?,
+            next_run_at: row
+                .try_get("next_run_at")
+                .map_err(|e| Error::backend("next_run_at", e))?,
+            config: config.0,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| Error::backend("created_at", e))?,
+            updated_at: row
+                .try_get("updated_at")
+                .map_err(|e| Error::backend("updated_at", e))?,
+        }))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn list_core_agents(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        query: ListQuery,
+    ) -> Result<Vec<CoreAgentRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT org_id, project_id, agent_id, name, sandbox_image, tools, schedule, enabled, next_run_at, config, created_at, updated_at
+              FROM core_agents
+             WHERE org_id = $1 AND project_id = $2
+             ORDER BY updated_at DESC, agent_id ASC
+             LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(project_id.0)
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::backend("list core agents", e))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let tools: sqlx::types::Json<Vec<String>> = row
+                .try_get("tools")
+                .map_err(|e| Error::backend("tools", e))?;
+            let schedule: sqlx::types::Json<Option<crate::core_agents::models::AgentSchedule>> =
+                row.try_get("schedule")
+                    .map_err(|e| Error::backend("schedule", e))?;
+            let config: sqlx::types::Json<serde_json::Value> = row
+                .try_get("config")
+                .map_err(|e| Error::backend("config", e))?;
+
+            out.push(CoreAgentRecord {
+                org_id: OrgId(
+                    row.try_get::<Uuid, _>("org_id")
+                        .map_err(|e| Error::backend("org_id", e))?,
+                ),
+                project_id: ProjectId(
+                    row.try_get::<Uuid, _>("project_id")
+                        .map_err(|e| Error::backend("project_id", e))?,
+                ),
+                agent_id: row
+                    .try_get("agent_id")
+                    .map_err(|e| Error::backend("agent_id", e))?,
+                name: row.try_get("name").map_err(|e| Error::backend("name", e))?,
+                sandbox_image: row
+                    .try_get("sandbox_image")
+                    .map_err(|e| Error::backend("sandbox_image", e))?,
+                tools: tools.0,
+                schedule: schedule.0,
+                enabled: row
+                    .try_get("enabled")
+                    .map_err(|e| Error::backend("enabled", e))?,
+                next_run_at: row
+                    .try_get("next_run_at")
+                    .map_err(|e| Error::backend("next_run_at", e))?,
+                config: config.0,
+                created_at: row
+                    .try_get("created_at")
+                    .map_err(|e| Error::backend("created_at", e))?,
+                updated_at: row
+                    .try_get("updated_at")
+                    .map_err(|e| Error::backend("updated_at", e))?,
+            });
+        }
+        Ok(out)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn delete_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM core_agents
+             WHERE org_id = $1 AND project_id = $2 AND agent_id = $3
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(project_id.0)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("delete core agent", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn set_core_agents_time_enabled(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        enabled: bool,
+    ) -> Result<u64> {
+        let res = sqlx::query(
+            r#"
+            UPDATE core_agents
+               SET enabled = $3,
+                   updated_at = NOW()
+             WHERE org_id = $1 AND project_id = $2
+               AND schedule_type IN ('cron','interval')
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(project_id.0)
+        .bind(enabled)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("set core agents time enabled", e))?;
+        Ok(res.rows_affected())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, cursor))]
+    async fn upsert_core_agent_event_cursor(&self, cursor: &CoreAgentEventCursor) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO core_agent_event_cursors
+                (org_id, project_id, agent_id, topic, last_seen_received_at, last_seen_event_id, updated_at)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (org_id, project_id, agent_id, topic) DO UPDATE SET
+                last_seen_received_at = EXCLUDED.last_seen_received_at,
+                last_seen_event_id = EXCLUDED.last_seen_event_id,
+                updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(cursor.org_id.0)
+        .bind(cursor.project_id.0)
+        .bind(&cursor.agent_id)
+        .bind(&cursor.topic)
+        .bind(cursor.last_seen_received_at)
+        .bind(&cursor.last_seen_event_id)
+        .bind(cursor.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::backend("upsert core agent event cursor", e))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn get_core_agent_event_cursor(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+        topic: &str,
+    ) -> Result<Option<CoreAgentEventCursor>> {
+        let row = sqlx::query(
+            r#"
+            SELECT org_id, project_id, agent_id, topic, last_seen_received_at, last_seen_event_id, updated_at
+              FROM core_agent_event_cursors
+             WHERE org_id = $1 AND project_id = $2 AND agent_id = $3 AND topic = $4
+             LIMIT 1
+            "#,
+        )
+        .bind(org_id.0)
+        .bind(project_id.0)
+        .bind(agent_id)
+        .bind(topic)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::backend("get core agent event cursor", e))?;
+
+        Ok(row.map(|r| CoreAgentEventCursor {
+            org_id: OrgId(r.try_get::<Uuid, _>("org_id").unwrap_or(Uuid::nil())),
+            project_id: ProjectId(r.try_get::<Uuid, _>("project_id").unwrap_or(Uuid::nil())),
+            agent_id: r.try_get::<String, _>("agent_id").unwrap_or_default(),
+            topic: r.try_get::<String, _>("topic").unwrap_or_default(),
+            last_seen_received_at: r
+                .try_get::<DateTime<Utc>, _>("last_seen_received_at")
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            last_seen_event_id: r
+                .try_get::<String, _>("last_seen_event_id")
+                .unwrap_or_default(),
+            updated_at: r
+                .try_get::<DateTime<Utc>, _>("updated_at")
+                .unwrap_or(Utc::now()),
+        }))
     }
 
     #[tracing::instrument(level = "debug", skip(self, state))]

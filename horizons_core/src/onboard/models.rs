@@ -1,3 +1,4 @@
+use crate::core_agents::models::AgentSchedule;
 use crate::models::AgentIdentity;
 use crate::models::{OrgId, ProjectId};
 use chrono::{DateTime, Utc};
@@ -50,6 +51,18 @@ pub struct UserRecord {
     pub email: String,
     pub display_name: Option<String>,
     pub role: UserRole,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Central DB project record (human-friendly slug + metadata).
+///
+/// This is separate from the ProjectDb handle storage; it exists to support
+/// consumer-facing APIs that use a stable slug identifier (e.g. Vistas).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRecord {
+    pub org_id: OrgId,
+    pub project_id: ProjectId,
+    pub slug: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -152,6 +165,51 @@ pub struct OperationRunRecord {
     pub error: Option<String>,
     pub output: serde_json::Value,
     pub created_at: DateTime<Utc>,
+}
+
+/// Persisted core-agent configuration for a single project.
+///
+/// This is the durable "agent spec" that Horizons uses to:
+/// - (re)register runnable agents on startup
+/// - drive self-scheduling (cron/interval) and event triggers
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoreAgentRecord {
+    pub org_id: OrgId,
+    pub project_id: ProjectId,
+    pub agent_id: String,
+    pub name: String,
+    pub sandbox_image: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub schedule: Option<AgentSchedule>,
+    /// Whether time-driven scheduling is enabled for this agent.
+    ///
+    /// `on_event` agents are always eligible when matching events arrive.
+    pub enabled: bool,
+    /// Optional scheduler state: the next time a cron/interval agent is due.
+    pub next_run_at: Option<DateTime<Utc>>,
+    /// Free-form config blob for agent-specific settings.
+    #[serde(default)]
+    pub config: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Per-agent cursor used for `AgentSchedule::OnEvent` scheduling.
+///
+/// Stores a high-water mark so restarts don't re-enqueue already-seen events.
+/// Uses `Event.received_at` (not domain `timestamp`) because EventBus queries
+/// are filtered and ordered by `received_at`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoreAgentEventCursor {
+    pub org_id: OrgId,
+    pub project_id: ProjectId,
+    pub agent_id: String,
+    pub topic: String,
+    pub last_seen_received_at: DateTime<Utc>,
+    pub last_seen_event_id: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Identifies a sync cursor.

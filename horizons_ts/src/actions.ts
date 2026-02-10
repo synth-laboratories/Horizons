@@ -1,9 +1,11 @@
 import { HorizonsClient } from "./client";
 import { ActionProposal, RiskLevel, UUID } from "./types";
 
+/** Action lifecycle API (propose, approve, deny, list pending). */
 export class ActionsAPI {
   constructor(private client: HorizonsClient) {}
 
+  /** Propose an action for approval and return the action ID. */
   async propose(input: {
     agent_id: string;
     action_type: string;
@@ -22,6 +24,7 @@ export class ActionsAPI {
     return resp.action_id;
   }
 
+  /** Approve a pending action proposal. */
   async approve(actionId: UUID, reason: string, project_id?: string): Promise<Record<string, unknown>> {
     const body: Record<string, unknown> = { reason };
     if (project_id) body.project_id = project_id;
@@ -32,6 +35,7 @@ export class ActionsAPI {
     });
   }
 
+  /** Deny a pending action proposal. */
   async deny(actionId: UUID, reason: string, project_id?: string): Promise<Record<string, unknown>> {
     const body: Record<string, unknown> = { reason };
     if (project_id) body.project_id = project_id;
@@ -42,6 +46,7 @@ export class ActionsAPI {
     });
   }
 
+  /** List pending action proposals for the project/org scope. */
   async pending(limit = 100, offset = 0, project_id?: string): Promise<ActionProposal[]> {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (project_id) params.append("project_id", project_id);

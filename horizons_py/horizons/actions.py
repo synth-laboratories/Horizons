@@ -8,6 +8,8 @@ from . import models
 
 
 class ActionsAPI:
+    """Action lifecycle API methods."""
+
     def __init__(self, client: HorizonsClient) -> None:
         self._client = client
 
@@ -23,6 +25,7 @@ class ActionsAPI:
         ttl_seconds: Optional[int] = None,
         project_id: Optional[UUID] = None,
     ) -> UUID:
+        """Propose an action for approval and return its action ID."""
         body: Dict[str, Any] = {
             "agent_id": agent_id,
             "action_type": action_type,
@@ -43,6 +46,7 @@ class ActionsAPI:
     async def approve(
         self, action_id: UUID, *, reason: str, project_id: Optional[UUID] = None
     ) -> Dict[str, Any]:
+        """Approve a pending action proposal."""
         body: Dict[str, Any] = {"reason": reason}
         if project_id:
             body["project_id"] = str(project_id)
@@ -54,6 +58,7 @@ class ActionsAPI:
     async def deny(
         self, action_id: UUID, *, reason: str, project_id: Optional[UUID] = None
     ) -> Dict[str, Any]:
+        """Deny a pending action proposal."""
         body: Dict[str, Any] = {"reason": reason}
         if project_id:
             body["project_id"] = str(project_id)
@@ -65,6 +70,7 @@ class ActionsAPI:
     async def pending(
         self, *, project_id: Optional[UUID] = None, limit: int = 100, offset: int = 0
     ) -> List[models.ActionProposal]:
+        """List pending action proposals for the current org/project scope."""
         params: Dict[str, Any] = {"limit": limit, "offset": offset}
         if project_id:
             params["project_id"] = str(project_id)

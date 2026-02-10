@@ -1,6 +1,6 @@
 [package]
 name = "horizons-ai"
-version = "0.1.2-dev.0"
+version = "0.1.2"
 edition = "2024"
 description = "Async Rust SDK for the Horizons REST API"
 repository = "https://github.com/horizons-laboratories/Horizons"

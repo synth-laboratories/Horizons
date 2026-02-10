@@ -55,6 +55,16 @@ impl AgentSpec {
 #[serde(rename_all = "snake_case")]
 pub enum AgentSchedule {
     Cron(String),
+    /// Fixed-interval schedule (seconds).
+    Interval {
+        seconds: u64,
+    },
+    /// Event-triggered schedule (topic match).
+    ///
+    /// Semantics: when an event with `topic` is published for the project, the agent is eligible to run.
+    OnEvent {
+        topic: String,
+    },
     OnDemand,
 }
 
@@ -259,6 +269,9 @@ pub struct AgentRunResult {
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub proposed_action_ids: Vec<Uuid>,
+    /// Optional agent-provided result for SideEffectOnly/Mixed outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<serde_json::Value>,
 }
 
 /// Return type for agents that may perform side effects directly (e.g. DB writes,

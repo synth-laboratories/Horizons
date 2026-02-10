@@ -43,6 +43,7 @@ class HorizonsClient:
         await self.aclose()
 
     async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
         await self._client.aclose()
 
     def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -70,6 +71,7 @@ class HorizonsClient:
         json: Optional[Any] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
+        """Send an authenticated request to Horizons and return raw response."""
         resp = await self._client.request(
             method,
             path,
@@ -83,6 +85,7 @@ class HorizonsClient:
 
     @staticmethod
     def _map_error(resp: httpx.Response) -> exceptions.HorizonsError:
+        """Map HTTP status codes to typed SDK exceptions."""
         if resp.status_code == 404:
             return exceptions.NotFoundError(resp.text)
         if resp.status_code in (401, 403):
@@ -92,6 +95,7 @@ class HorizonsClient:
         return exceptions.ServerError(resp.text)
 
     async def json(self, resp: httpx.Response) -> Any:
+        """Parse JSON for successful responses or raise mapped exceptions."""
         if 200 <= resp.status_code < 300:
             if resp.headers.get("content-length") == "0":
                 return None
@@ -99,6 +103,7 @@ class HorizonsClient:
         raise self._map_error(resp)
 
     async def sse(self, path: str, *, json: Any) -> AsyncIterator[Dict[str, Any]]:
+        """Stream server-sent events from a Horizons endpoint."""
         async with self._client.stream(
             "POST",
             path,
@@ -188,5 +193,6 @@ class HorizonsClient:
         return McpAPI(self)
 
     async def health(self) -> Any:
+        """Fetch `/api/v1/health` status from the current deployment."""
         resp = await self._request("GET", "/api/v1/health")
         return await self.json(resp)

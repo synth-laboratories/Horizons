@@ -38,10 +38,10 @@ use horizons_core::onboard::postgres::PostgresCentralDb;
 use horizons_core::onboard::redis::RedisCache;
 use horizons_core::onboard::secrets::CredentialManager;
 use horizons_core::onboard::traits::{
-    ApiKeyRecord, AuditQuery, Cache, CentralDb, ConnectorCredential, Filestore, GraphStore,
-    ListQuery, OperationRecord, OperationRunRecord, OrgRecord, ProjectDb, ProjectDbParam,
-    ProjectDbRow, ProjectDbValue, ResourceRecord, SyncState, SyncStateKey, UserRecord, UserRole,
-    VectorMatch, VectorStore,
+    ApiKeyRecord, AuditQuery, Cache, CentralDb, ConnectorCredential, CoreAgentEventCursor,
+    CoreAgentRecord, Filestore, GraphStore, ListQuery, OperationRecord, OperationRunRecord,
+    OrgRecord, ProjectDb, ProjectDbParam, ProjectDbRow, ProjectDbValue, ProjectRecord,
+    ResourceRecord, SyncState, SyncStateKey, UserRecord, UserRole, VectorMatch, VectorStore,
 };
 #[cfg(feature = "optimization")]
 use horizons_core::optimization::engine::OptimizationEngine;
@@ -411,6 +411,7 @@ impl CoreAgentSpec for DevNoopAgent {
 pub struct DevCentralDb {
     orgs: Arc<RwLock<HashMap<OrgId, OrgRecord>>>,
     users: Arc<RwLock<HashMap<(OrgId, Uuid), UserRecord>>>,
+    projects: Arc<RwLock<HashMap<(OrgId, ProjectId), ProjectRecord>>>,
     api_keys: Arc<RwLock<HashMap<Uuid, ApiKeyRecord>>>,
     platform_config: Arc<RwLock<HashMap<OrgId, PlatformConfig>>>,
     audit: Arc<RwLock<HashMap<OrgId, Vec<AuditEntry>>>>,
@@ -418,6 +419,13 @@ pub struct DevCentralDb {
     resources: Arc<RwLock<HashMap<(OrgId, String), ResourceRecord>>>,
     operations: Arc<RwLock<HashMap<(OrgId, String), OperationRecord>>>,
     operation_runs: Arc<RwLock<Vec<OperationRunRecord>>>,
+    core_agents: Arc<
+        RwLock<
+            HashMap<(OrgId, ProjectId, String), horizons_core::onboard::models::CoreAgentRecord>,
+        >,
+    >,
+    core_agent_event_cursors:
+        Arc<RwLock<HashMap<(OrgId, ProjectId, String, String), CoreAgentEventCursor>>>,
     sync_state: Arc<RwLock<HashMap<String, SyncState>>>,
     sources: Arc<RwLock<HashMap<(OrgId, String), SourceConfig>>>,
     runs: Arc<RwLock<Vec<RefreshRun>>>,
@@ -429,6 +437,7 @@ impl DevCentralDb {
         Self {
             orgs: Arc::new(RwLock::new(HashMap::new())),
             users: Arc::new(RwLock::new(HashMap::new())),
+            projects: Arc::new(RwLock::new(HashMap::new())),
             api_keys: Arc::new(RwLock::new(HashMap::new())),
             platform_config: Arc::new(RwLock::new(HashMap::new())),
             audit: Arc::new(RwLock::new(HashMap::new())),
@@ -436,6 +445,8 @@ impl DevCentralDb {
             resources: Arc::new(RwLock::new(HashMap::new())),
             operations: Arc::new(RwLock::new(HashMap::new())),
             operation_runs: Arc::new(RwLock::new(Vec::new())),
+            core_agents: Arc::new(RwLock::new(HashMap::new())),
+            core_agent_event_cursors: Arc::new(RwLock::new(HashMap::new())),
             sync_state: Arc::new(RwLock::new(HashMap::new())),
             sources: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(Vec::new())),
@@ -467,6 +478,20 @@ impl CentralDb for DevCentralDb {
         Ok(self.orgs.read().await.get(&org_id).cloned())
     }
 
+    async fn list_orgs(&self, query: ListQuery) -> CoreResult<Vec<OrgRecord>> {
+        let orgs = self.orgs.read().await;
+        let mut rows: Vec<OrgRecord> = orgs.values().cloned().collect();
+        // uuid::Uuid doesn't implement Ord, so sort deterministically using the string form.
+        rows.sort_by(|a, b| {
+            (a.created_at, a.org_id.to_string()).cmp(&(b.created_at, b.org_id.to_string()))
+        });
+        Ok(rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect())
+    }
+
     #[tracing::instrument(level = "debug", skip_all)]
     async fn upsert_user(&self, user: &UserRecord) -> CoreResult<()> {
         self.users
@@ -490,6 +515,61 @@ impl CentralDb for DevCentralDb {
             .cloned()
             .collect();
         rows.sort_by_key(|u| (u.created_at, u.user_id));
+        Ok(rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect())
+    }
+
+    async fn upsert_project(&self, project: &ProjectRecord) -> CoreResult<()> {
+        if project.slug.trim().is_empty() {
+            return Err(CoreError::InvalidInput("project slug is empty".to_string()));
+        }
+        self.projects
+            .write()
+            .await
+            .insert((project.org_id, project.project_id), project.clone());
+        Ok(())
+    }
+
+    async fn get_project_by_id(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+    ) -> CoreResult<Option<ProjectRecord>> {
+        Ok(self.projects.read().await.get(&(org_id, project_id)).cloned())
+    }
+
+    async fn get_project_by_slug(
+        &self,
+        org_id: OrgId,
+        slug: &str,
+    ) -> CoreResult<Option<ProjectRecord>> {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            return Ok(None);
+        }
+        let projects = self.projects.read().await;
+        Ok(projects
+            .values()
+            .find(|p| p.org_id == org_id && p.slug == slug)
+            .cloned())
+    }
+
+    async fn list_projects(
+        &self,
+        org_id: OrgId,
+        query: ListQuery,
+    ) -> CoreResult<Vec<ProjectRecord>> {
+        let projects = self.projects.read().await;
+        let mut rows: Vec<ProjectRecord> = projects
+            .values()
+            .filter(|p| p.org_id == org_id)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|p| (p.created_at, p.project_id.to_string()));
+        rows.reverse();
         Ok(rows
             .into_iter()
             .skip(query.offset)
@@ -766,6 +846,130 @@ impl CentralDb for DevCentralDb {
             .skip(query.offset)
             .take(query.limit)
             .collect())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn upsert_core_agent(&self, agent: &CoreAgentRecord) -> CoreResult<()> {
+        self.core_agents.write().await.insert(
+            (agent.org_id, agent.project_id, agent.agent_id.clone()),
+            agent.clone(),
+        );
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> CoreResult<Option<CoreAgentRecord>> {
+        Ok(self
+            .core_agents
+            .read()
+            .await
+            .get(&(org_id, project_id, agent_id.to_string()))
+            .cloned())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_core_agents(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        query: ListQuery,
+    ) -> CoreResult<Vec<CoreAgentRecord>> {
+        let agents = self.core_agents.read().await;
+        let mut rows: Vec<CoreAgentRecord> = agents
+            .values()
+            .filter(|a| a.org_id == org_id && a.project_id == project_id)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|a| (a.updated_at, a.agent_id.clone()));
+        rows.reverse();
+        Ok(rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .collect())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn delete_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> CoreResult<()> {
+        self.core_agents
+            .write()
+            .await
+            .remove(&(org_id, project_id, agent_id.to_string()));
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn set_core_agents_time_enabled(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        enabled: bool,
+    ) -> CoreResult<u64> {
+        use horizons_core::core_agents::models::AgentSchedule;
+
+        let mut agents = self.core_agents.write().await;
+        let mut updated = 0u64;
+        for ((o, p, _), a) in agents.iter_mut() {
+            if *o != org_id || *p != project_id {
+                continue;
+            }
+            let is_time = matches!(
+                a.schedule,
+                Some(AgentSchedule::Cron(_)) | Some(AgentSchedule::Interval { .. })
+            );
+            if !is_time {
+                continue;
+            }
+            if a.enabled != enabled {
+                a.enabled = enabled;
+                a.updated_at = Utc::now();
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn upsert_core_agent_event_cursor(
+        &self,
+        cursor: &CoreAgentEventCursor,
+    ) -> CoreResult<()> {
+        self.core_agent_event_cursors.write().await.insert(
+            (
+                cursor.org_id,
+                cursor.project_id,
+                cursor.agent_id.clone(),
+                cursor.topic.clone(),
+            ),
+            cursor.clone(),
+        );
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn get_core_agent_event_cursor(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+        topic: &str,
+    ) -> CoreResult<Option<CoreAgentEventCursor>> {
+        Ok(self
+            .core_agent_event_cursors
+            .read()
+            .await
+            .get(&(org_id, project_id, agent_id.to_string(), topic.to_string()))
+            .cloned())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1717,12 +1921,17 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         let mut cfg = EventSyncConfig::default();
         cfg.postgres_url = pg;
         cfg.redis_url = redis;
+        cfg.webhook_signing_secret = std::env::var("HORIZONS_WEBHOOK_SIGNING_SECRET")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let op_exec = Arc::new(CentralDbOperationExecutor::new(
             central_db.clone(),
             Some(credential_manager.clone()),
-            WebhookSender::new(std::time::Duration::from_millis(
-                cfg.outbound_webhook_timeout_ms,
-            )),
+            WebhookSender::new(
+                std::time::Duration::from_millis(cfg.outbound_webhook_timeout_ms),
+                None,
+            ),
         )) as Arc<dyn horizons_core::events::operations::OperationExecutor>;
         Arc::new(RedisEventBus::connect(cfg, Some(op_exec)).await?)
     } else {
@@ -1753,6 +1962,14 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         .with_mcp_scope_provider(mcp_scope_provider.clone()),
     );
     core_agents.register_agent(Arc::new(DevNoopAgent)).await?;
+
+    let core_scheduler = Arc::new(horizons_core::core_agents::scheduler::CoreScheduler::new(
+        central_db.clone(),
+        project_db.clone(),
+        event_bus.clone(),
+        core_agents.clone() as Arc<dyn horizons_core::core_agents::traits::CoreAgents>,
+        horizons_core::core_agents::scheduler::CoreSchedulerConfig::default(),
+    ));
 
     let mcp_gateway: Option<Arc<McpGateway>> = if let Ok(cfg) = std::env::var("HORIZONS_MCP_CONFIG")
     {
@@ -1959,6 +2176,7 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
         event_bus,
         context_refresh,
         core_agents,
+        core_scheduler,
         pipelines,
         Some(credential_manager),
         mcp_gateway,

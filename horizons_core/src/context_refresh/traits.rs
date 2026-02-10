@@ -1,4 +1,6 @@
-use crate::context_refresh::models::{ContextEntity, RefreshRun, RefreshTrigger, SourceConfig, SyncCursor};
+use crate::context_refresh::models::{
+    ContextEntity, RefreshRun, RefreshTrigger, SourceConfig, SyncCursor,
+};
 use crate::models::{AgentIdentity, OrgId};
 use crate::onboard::traits::{CentralDb, ProjectDb};
 use crate::{Error, Result};

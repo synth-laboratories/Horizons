@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Router};
-use leptos::{component, view, Children, IntoView};
+use leptos::{Children, IntoView, component, view};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,11 @@ fn page_shell(title: &str, active: &str, body: &str) -> String {
     let nav_html: String = nav_items
         .iter()
         .map(|(id, label, href)| {
-            let cls = if *id == active { "nav-link active" } else { "nav-link" };
+            let cls = if *id == active {
+                "nav-link active"
+            } else {
+                "nav-link"
+            };
             format!(r#"<a class="{cls}" href="{href}">{label}</a>"#)
         })
         .collect::<Vec<_>>()

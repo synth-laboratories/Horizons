@@ -17,22 +17,71 @@ pub struct AuthConfig {
     pub allow_insecure_mutating_requests: bool,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AuthMode {
+    DevInsecure,
+    DevStrict,
+    Production,
+}
+
+impl AuthMode {
+    fn from_env() -> Option<Self> {
+        let v = std::env::var("HORIZONS_AUTH_MODE").ok()?;
+        match v.trim().to_ascii_lowercase().as_str() {
+            "dev_insecure" | "devinsecure" | "insecure" => Some(Self::DevInsecure),
+            "dev_strict" | "devstrict" | "strict" => Some(Self::DevStrict),
+            "production" | "prod" => Some(Self::Production),
+            _ => None,
+        }
+    }
+}
+
 impl Default for AuthConfig {
     fn default() -> Self {
-        let require_auth = env_bool("HORIZONS_REQUIRE_AUTH").unwrap_or(false);
-        // Back-compat/dev: headers-only auth remains the default until explicitly disabled.
-        let allow_insecure_headers = env_bool("HORIZONS_ALLOW_INSECURE_HEADERS").unwrap_or(true);
-        // Near-term hardening: require verified auth for state-mutating endpoints by default.
-        let require_auth_for_mutating =
-            env_bool("HORIZONS_REQUIRE_AUTH_FOR_MUTATING").unwrap_or(true);
-        let allow_insecure_mutating_requests =
-            env_bool("HORIZONS_ALLOW_INSECURE_MUTATING_REQUESTS").unwrap_or(false);
-        Self {
-            require_auth,
-            allow_insecure_headers,
-            require_auth_for_mutating,
-            allow_insecure_mutating_requests,
+        // Mode-driven defaults.
+        let mut cfg = match AuthMode::from_env() {
+            Some(AuthMode::DevInsecure) => Self {
+                require_auth: false,
+                allow_insecure_headers: true,
+                require_auth_for_mutating: false,
+                allow_insecure_mutating_requests: true,
+            },
+            Some(AuthMode::DevStrict) => Self {
+                require_auth: false,
+                allow_insecure_headers: true,
+                require_auth_for_mutating: true,
+                allow_insecure_mutating_requests: false,
+            },
+            Some(AuthMode::Production) => Self {
+                require_auth: true,
+                allow_insecure_headers: false,
+                require_auth_for_mutating: true,
+                allow_insecure_mutating_requests: false,
+            },
+            None => Self {
+                // Legacy defaults (kept for backward compat).
+                require_auth: false,
+                allow_insecure_headers: true,
+                require_auth_for_mutating: true,
+                allow_insecure_mutating_requests: false,
+            },
+        };
+
+        // Per-flag overrides (explicit env vars win over mode).
+        if let Some(v) = env_bool("HORIZONS_REQUIRE_AUTH") {
+            cfg.require_auth = v;
         }
+        if let Some(v) = env_bool("HORIZONS_ALLOW_INSECURE_HEADERS") {
+            cfg.allow_insecure_headers = v;
+        }
+        if let Some(v) = env_bool("HORIZONS_REQUIRE_AUTH_FOR_MUTATING") {
+            cfg.require_auth_for_mutating = v;
+        }
+        if let Some(v) = env_bool("HORIZONS_ALLOW_INSECURE_MUTATING_REQUESTS") {
+            cfg.allow_insecure_mutating_requests = v;
+        }
+
+        cfg
     }
 }
 
@@ -199,6 +248,34 @@ fn extract_identity_from_headers(
 
 #[derive(Debug, Copy, Clone)]
 pub struct OrgIdHeader(pub OrgId);
+
+/// Optional org_id extractor.
+///
+/// Axum's `Option<T>` extractor support varies across versions; keep this as an explicit
+/// extractor so routes can accept either verified auth org binding or no org header.
+#[derive(Debug, Copy, Clone)]
+pub struct MaybeOrgIdHeader(pub Option<OrgId>);
+
+impl<S> FromRequestParts<S> for MaybeOrgIdHeader
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    #[tracing::instrument(level = "debug", name = "extract.maybe_org_id", skip_all)]
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        async move {
+            match OrgIdHeader::from_request_parts(parts, state).await {
+                Ok(OrgIdHeader(org_id)) => Ok(Self(Some(org_id))),
+                Err(ApiError::MissingOrgId) => Ok(Self(None)),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
 
 impl<S> FromRequestParts<S> for OrgIdHeader
 where

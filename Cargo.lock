@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "horizons-ai"
-version = "0.1.2-dev.0"
+version = "0.1.2"
 dependencies = [
  "async-stream",
  "bytes",
@@ -2548,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "horizons_core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "horizons_integrations"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "horizons_server"
-version = "0.1.2-dev.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2653,6 +2653,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "cron",
  "futures-util",
  "horizons_core",
  "horizons_graph",

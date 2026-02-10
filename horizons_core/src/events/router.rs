@@ -70,8 +70,10 @@ impl EventRouter {
         operation_executor: Option<Arc<dyn OperationExecutor>>,
     ) -> EventRouterHandle {
         let (wake_tx, wake_rx) = mpsc::channel::<String>(1024);
-        let webhook_sender =
-            WebhookSender::new(Duration::from_millis(cfg.outbound_webhook_timeout_ms));
+        let webhook_sender = WebhookSender::new(
+            Duration::from_millis(cfg.outbound_webhook_timeout_ms),
+            cfg.webhook_signing_secret.clone(),
+        );
 
         let router = Self {
             cfg,

@@ -1581,9 +1581,10 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
             let op_exec = Arc::new(CentralDbOperationExecutor::new(
                 central_db.clone(),
                 Some(credential_manager.clone()),
-                WebhookSender::new(std::time::Duration::from_millis(
-                    cfg.outbound_webhook_timeout_ms,
-                )),
+                WebhookSender::new(
+                    std::time::Duration::from_millis(cfg.outbound_webhook_timeout_ms),
+                    None,
+                ),
             )) as Arc<dyn horizons_core::events::operations::OperationExecutor>;
             Arc::new(RedisEventBus::connect(cfg, Some(op_exec)).await?)
         } else {

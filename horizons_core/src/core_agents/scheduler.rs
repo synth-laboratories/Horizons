@@ -1,194 +1,476 @@
-//! Cron-based agent scheduler.
+//! System 2 self-driving scheduler.
 //!
-//! Evaluates cron expressions for registered agents and triggers `executor.run()`
-//! when agents are due. Runs as a background tokio task.
+//! Horizons supports three orthogonal scheduling modes for core agents:
+//! - Reactive: run agents when matching events arrive (`AgentSchedule::OnEvent`)
+//! - Time-driven: cron/interval (`AgentSchedule::Cron`, `AgentSchedule::Interval`)
+//! - Logical stepping: explicit `tick()` runs up to N queued runs (step/drain)
+//!
+//! This module provides an explicit scheduler object that:
+//! - polls the EventBus for `on_event` schedules
+//! - evaluates cron/interval schedules using `core_agents.next_run_at`
+//! - maintains an in-memory run queue so callers can "step" execution
+//! - emits scheduler + agent-run lifecycle events to the EventBus
+//!
+//! Note: `on_event` is implemented via polling (`EventBus::query`). This keeps
+//! behavior predictable across deployments and enables deterministic stepping.
 
-use crate::core_agents::executor::CoreAgentsExecutor;
+use crate::core_agents::models::AgentSchedule;
 use crate::core_agents::traits::CoreAgents;
-use crate::models::{AgentIdentity, OrgId, ProjectDbHandle, ProjectId};
-use chrono::Utc;
+use crate::events::models::{Event, EventDirection, EventQuery};
+use crate::events::traits::EventBus;
+use crate::models::{AgentIdentity, OrgId, ProjectId};
+use crate::onboard::models::{CoreAgentEventCursor, CoreAgentRecord, ListQuery};
+use crate::onboard::traits::{CentralDb, ProjectDb};
+use crate::{Error, Result};
+use chrono::{DateTime, Duration, Utc};
 use cron::Schedule;
-use std::collections::HashMap;
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
-/// Tick interval for the scheduler loop.
-const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-/// If a run has been marked in-flight longer than this, treat it as stale.
-const STALE_IN_FLIGHT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-
-/// Configuration for a cron-scheduled agent.
 #[derive(Debug, Clone)]
-pub struct CronAgent {
-    pub agent_id: String,
+pub struct CoreSchedulerConfig {
+    /// Max number of events to fetch per `on_event` agent per tick.
+    pub on_event_batch_limit: usize,
+    /// If no durable cursor exists yet, look back this long for events.
+    pub on_event_initial_lookback_seconds: i64,
+}
+
+impl Default for CoreSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            on_event_batch_limit: 25,
+            on_event_initial_lookback_seconds: 60 * 60, // 1h
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduledRun {
     pub org_id: OrgId,
     pub project_id: ProjectId,
-    pub cron_expression: String,
-    pub project_db_handle: ProjectDbHandle,
+    pub agent_id: String,
+    pub reason: String,
+    pub inputs: Option<Value>,
 }
 
-/// Background agent scheduler that evaluates cron expressions and triggers
-/// agent runs on schedule.
-pub struct AgentScheduler {
-    /// The executor to call when agents are due.
-    executor: Arc<CoreAgentsExecutor>,
-    /// Registered cron-scheduled agents.
-    cron_agents: Arc<RwLock<Vec<CronAgent>>>,
-    /// Tracks the last time each agent was triggered (to avoid double-fires).
-    last_triggered: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
-    /// Tracks agents currently running (best-effort, in-memory only).
-    in_flight: Arc<RwLock<HashMap<String, std::time::Instant>>>,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TickResult {
+    pub enqueued: usize,
+    pub ran: usize,
+    pub run_errors: usize,
+    pub queue_depth: usize,
 }
 
-impl AgentScheduler {
-    pub fn new(executor: Arc<CoreAgentsExecutor>) -> Self {
+/// Explicit scheduler object used by Horizons server to run self-driving apps.
+#[derive(Clone)]
+pub struct CoreScheduler {
+    cfg: CoreSchedulerConfig,
+    central_db: Arc<dyn CentralDb>,
+    project_db: Arc<dyn ProjectDb>,
+    event_bus: Arc<dyn EventBus>,
+    core_agents: Arc<dyn CoreAgents>,
+
+    queues: Arc<DashMap<(OrgId, ProjectId), Arc<Mutex<VecDeque<ScheduledRun>>>>>,
+    // Hot cache of durable `on_event` cursors.
+    // Key: (org_id, project_id, agent_id, topic) -> (last_seen_received_at, last_seen_event_id)
+    on_event_cursors: Arc<DashMap<(OrgId, ProjectId, String, String), (DateTime<Utc>, String)>>,
+}
+
+impl CoreScheduler {
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub fn new(
+        central_db: Arc<dyn CentralDb>,
+        project_db: Arc<dyn ProjectDb>,
+        event_bus: Arc<dyn EventBus>,
+        core_agents: Arc<dyn CoreAgents>,
+        cfg: CoreSchedulerConfig,
+    ) -> Self {
         Self {
-            executor,
-            cron_agents: Arc::new(RwLock::new(Vec::new())),
-            last_triggered: Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Arc::new(RwLock::new(HashMap::new())),
+            cfg,
+            central_db,
+            project_db,
+            event_bus,
+            core_agents,
+            queues: Arc::new(DashMap::new()),
+            on_event_cursors: Arc::new(DashMap::new()),
         }
     }
 
-    /// Register a cron-scheduled agent.
-    pub async fn register_cron_agent(&self, agent: CronAgent) -> crate::Result<()> {
-        // Validate the cron expression.
-        Schedule::from_str(&agent.cron_expression).map_err(|e| {
-            crate::Error::InvalidInput(format!(
-                "invalid cron expression '{}': {e}",
-                agent.cron_expression
-            ))
-        })?;
-
-        let mut agents = self.cron_agents.write().await;
-        agents.push(agent);
-        Ok(())
+    fn queue_for(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+    ) -> Arc<Mutex<VecDeque<ScheduledRun>>> {
+        self.queues
+            .entry((org_id, project_id))
+            .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())))
+            .clone()
     }
 
-    /// Start the scheduler loop. This runs forever (or until the task is dropped).
-    ///
-    /// Spawns a tokio task that ticks every 30 seconds, checks which agents
-    /// are due based on their cron expressions, and fires `executor.run()`.
-    pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            tracing::info!("agent scheduler started");
-            let mut interval = tokio::time::interval(TICK_INTERVAL);
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn tick_project(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        now: DateTime<Utc>,
+        max_runs_per_tick: usize,
+    ) -> Result<TickResult> {
+        if max_runs_per_tick == 0 {
+            return Err(Error::InvalidInput(
+                "max_runs_per_tick must be > 0".to_string(),
+            ));
+        }
 
-            loop {
-                interval.tick().await;
+        // Ensure project is provisioned before attempting any agent runs.
+        let handle = self
+            .project_db
+            .get_handle(org_id, project_id)
+            .await?
+            .ok_or_else(|| Error::NotFound("project not provisioned".to_string()))?;
 
-                if let Err(e) = self.tick().await {
-                    tracing::error!(%e, "scheduler tick failed");
-                }
-            }
-        })
-    }
+        let mut result = TickResult::default();
 
-    /// Perform a single scheduler tick: evaluate cron expressions, fire due agents.
-    #[tracing::instrument(level = "debug", skip(self))]
-    async fn tick(&self) -> crate::Result<()> {
-        let now = Utc::now();
-        let agents = self.cron_agents.read().await;
+        // 1) Enqueue any due runs (time-driven + on_event).
+        result.enqueued += self.enqueue_due(org_id, project_id, now).await?;
 
-        for agent in agents.iter() {
-            if self
-                .is_due(&agent.agent_id, &agent.cron_expression, now)
+        // 2) Drain up to N runs.
+        let q = self.queue_for(org_id, project_id);
+        for _ in 0..max_runs_per_tick {
+            let next = {
+                let mut guard = q.lock().await;
+                guard.pop_front()
+            };
+            let Some(run) = next else {
+                break;
+            };
+
+            self.emit_scheduler_event(
+                org_id,
+                project_id,
+                "core.scheduler.agent_run.started",
+                serde_json::json!({
+                    "agent_id": run.agent_id,
+                    "reason": run.reason,
+                    "at": now.to_rfc3339(),
+                }),
+            )
+            .await;
+
+            let identity = AgentIdentity::System {
+                name: format!("core_scheduler:{}", project_id),
+            };
+
+            match self
+                .core_agents
+                .run(
+                    org_id,
+                    project_id,
+                    handle.clone(),
+                    &run.agent_id,
+                    &identity,
+                    run.inputs.clone(),
+                )
                 .await
             {
-                // Prevent duplicate runs if a previous run is still in progress.
-                {
-                    let mut in_flight = self.in_flight.write().await;
-                    if let Some(started) = in_flight.get(&agent.agent_id).copied() {
-                        let elapsed = started.elapsed();
-                        if elapsed < STALE_IN_FLIGHT {
+                Ok(agent_res) => {
+                    result.ran += 1;
+                    self.emit_scheduler_event(
+                        org_id,
+                        project_id,
+                        "core.scheduler.agent_run.completed",
+                        serde_json::json!({
+                            "agent_id": run.agent_id,
+                            "reason": run.reason,
+                            "run_id": agent_res.run_id,
+                            "proposals": agent_res.proposed_action_ids.len(),
+                            "at": Utc::now().to_rfc3339(),
+                        }),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    result.run_errors += 1;
+                    self.emit_scheduler_event(
+                        org_id,
+                        project_id,
+                        "core.scheduler.agent_run.failed",
+                        serde_json::json!({
+                            "agent_id": run.agent_id,
+                            "reason": run.reason,
+                            "error": e.to_string(),
+                            "at": Utc::now().to_rfc3339(),
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        result.queue_depth = q.lock().await.len();
+
+        self.emit_scheduler_event(
+            org_id,
+            project_id,
+            "core.scheduler.tick",
+            serde_json::json!({
+                "enqueued": result.enqueued,
+                "ran": result.ran,
+                "run_errors": result.run_errors,
+                "queue_depth": result.queue_depth,
+                "at": now.to_rfc3339(),
+            }),
+        )
+        .await;
+
+        Ok(result)
+    }
+
+    async fn enqueue_due(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        let mut enqueued = 0usize;
+
+        let agents = self
+            .central_db
+            .list_core_agents(
+                org_id,
+                project_id,
+                ListQuery {
+                    limit: 1000,
+                    offset: 0,
+                },
+            )
+            .await?;
+
+        // Time-driven: schedule when due, and persist the next_run_at immediately to prevent re-enqueue.
+        for mut a in agents.iter().cloned() {
+            let Some(schedule) = a.schedule.clone() else {
+                continue;
+            };
+
+            match schedule {
+                AgentSchedule::Cron(expr) => {
+                    if !a.enabled {
+                        continue;
+                    }
+                    if !is_due(a.next_run_at, now) {
+                        continue;
+                    }
+                    let next_run_at = match next_cron_after(&expr, now) {
+                        Ok(v) => v,
+                        Err(e) => {
                             tracing::warn!(
-                                agent_id = %agent.agent_id,
-                                elapsed_s = elapsed.as_secs(),
-                                "agent still in-flight; skipping scheduled run"
+                                org_id = %org_id,
+                                project_id = %project_id,
+                                agent_id = %a.agent_id,
+                                error = %e,
+                                "invalid cron schedule; skipping agent"
                             );
                             continue;
                         }
+                    };
+                    a.next_run_at = next_run_at;
+                    a.updated_at = Utc::now();
+                    self.central_db.upsert_core_agent(&a).await?;
 
-                        // Stale: clear and allow a new run. Cleanup of any external resources
-                        // is best-effort and handled by per-system runtimes.
-                        tracing::warn!(
-                            agent_id = %agent.agent_id,
-                            elapsed_s = elapsed.as_secs(),
-                            "stale in-flight run detected; allowing new run"
-                        );
-                        in_flight.remove(&agent.agent_id);
-                    }
-                    in_flight.insert(agent.agent_id.clone(), std::time::Instant::now());
+                    self.enqueue_run(ScheduledRun {
+                        org_id,
+                        project_id,
+                        agent_id: a.agent_id.clone(),
+                        reason: format!("cron:{expr}"),
+                        inputs: None,
+                    })
+                    .await;
+                    enqueued += 1;
                 }
-
-                tracing::info!(agent_id = %agent.agent_id, "cron agent is due, triggering run");
-
-                let identity = AgentIdentity::System {
-                    name: format!("scheduler:{}", agent.agent_id),
-                };
-
-                match self
-                    .executor
-                    .run(
-                        agent.org_id,
-                        agent.project_id,
-                        agent.project_db_handle.clone(),
-                        &agent.agent_id,
-                        &identity,
-                        None,
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        tracing::info!(
-                            agent_id = %agent.agent_id,
-                            run_id = %result.run_id,
-                            proposals = result.proposed_action_ids.len(),
-                            "scheduled agent run completed"
-                        );
+                AgentSchedule::Interval { seconds } => {
+                    if !a.enabled {
+                        continue;
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            agent_id = %agent.agent_id,
-                            %e,
-                            "scheduled agent run failed"
-                        );
+                    if seconds == 0 {
+                        continue;
                     }
-                }
+                    if !is_due(a.next_run_at, now) {
+                        continue;
+                    }
+                    a.next_run_at = Some(now + Duration::seconds(seconds as i64));
+                    a.updated_at = Utc::now();
+                    self.central_db.upsert_core_agent(&a).await?;
 
-                // Clear in-flight marker.
-                {
-                    let mut in_flight = self.in_flight.write().await;
-                    in_flight.remove(&agent.agent_id);
+                    self.enqueue_run(ScheduledRun {
+                        org_id,
+                        project_id,
+                        agent_id: a.agent_id.clone(),
+                        reason: format!("interval:{seconds}s"),
+                        inputs: None,
+                    })
+                    .await;
+                    enqueued += 1;
                 }
-
-                // Record trigger time to avoid double-fire within the same tick window.
-                let mut triggered = self.last_triggered.write().await;
-                triggered.insert(agent.agent_id.clone(), now);
+                AgentSchedule::OnEvent { topic } => {
+                    let n = self.enqueue_on_event(&a, &topic, now).await?;
+                    enqueued += n;
+                }
+                AgentSchedule::OnDemand => {}
             }
         }
 
-        Ok(())
+        Ok(enqueued)
     }
 
-    /// Check if a cron agent is due to run based on its expression and last trigger time.
-    async fn is_due(&self, agent_id: &str, cron_expr: &str, now: chrono::DateTime<Utc>) -> bool {
-        let schedule = match Schedule::from_str(cron_expr) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(%agent_id, %e, "invalid cron expression, skipping");
-                return false;
+    async fn enqueue_on_event(
+        &self,
+        agent: &CoreAgentRecord,
+        topic: &str,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        let key = (
+            agent.org_id,
+            agent.project_id,
+            agent.agent_id.clone(),
+            topic.to_string(),
+        );
+
+        // EventBus queries are filtered and ordered by `received_at`, so the cursor must use it too.
+        let (last_seen_received_at, last_seen_event_id) = if let Some(v) =
+            self.on_event_cursors.get(&key)
+        {
+            v.value().clone()
+        } else {
+            let persisted = self
+                .central_db
+                .get_core_agent_event_cursor(agent.org_id, agent.project_id, &agent.agent_id, topic)
+                .await?;
+            if let Some(c) = persisted {
+                let v = (c.last_seen_received_at, c.last_seen_event_id);
+                self.on_event_cursors.insert(key.clone(), v.clone());
+                v
+            } else {
+                let since = now - Duration::seconds(self.cfg.on_event_initial_lookback_seconds);
+                let v = (since, String::new());
+                self.on_event_cursors.insert(key.clone(), v.clone());
+                v
             }
         };
 
-        let last_triggered = self.last_triggered.read().await;
-        let since = last_triggered
-            .get(agent_id)
-            .copied()
-            .unwrap_or_else(|| now - chrono::Duration::hours(24));
+        let query = EventQuery {
+            org_id: agent.org_id.to_string(),
+            project_id: Some(agent.project_id.to_string()),
+            topic: Some(topic.to_string()),
+            direction: None,
+            since: Some(last_seen_received_at),
+            until: None,
+            status: None,
+            limit: self.cfg.on_event_batch_limit.max(1),
+        };
 
-        // Check if there's a scheduled time between `since` and `now`.
-        schedule.after(&since).take(1).any(|next| next <= now)
+        let events = self
+            .event_bus
+            .query(query)
+            .await
+            .map_err(|e| Error::BackendMessage(format!("event_bus.query: {e}")))?;
+        if events.is_empty() {
+            return Ok(0);
+        }
+
+        let mut max_seen = (last_seen_received_at, last_seen_event_id.clone());
+        let mut enqueued = 0usize;
+        for ev in events {
+            let ev_key = (ev.received_at, ev.id.clone());
+            if ev_key <= (last_seen_received_at, last_seen_event_id.clone()) {
+                continue;
+            }
+            if ev_key > max_seen {
+                max_seen = ev_key.clone();
+            }
+            self.enqueue_run(ScheduledRun {
+                org_id: agent.org_id,
+                project_id: agent.project_id,
+                agent_id: agent.agent_id.clone(),
+                reason: format!("on_event:{}:{}", topic, ev.id),
+                inputs: Some(ev.payload),
+            })
+            .await;
+            enqueued += 1;
+        }
+
+        if enqueued > 0 {
+            let cursor = CoreAgentEventCursor {
+                org_id: agent.org_id,
+                project_id: agent.project_id,
+                agent_id: agent.agent_id.clone(),
+                topic: topic.to_string(),
+                last_seen_received_at: max_seen.0,
+                last_seen_event_id: max_seen.1.clone(),
+                updated_at: Utc::now(),
+            };
+            self.central_db
+                .upsert_core_agent_event_cursor(&cursor)
+                .await?;
+            self.on_event_cursors.insert(key, max_seen);
+        }
+        Ok(enqueued)
     }
+
+    async fn enqueue_run(&self, run: ScheduledRun) {
+        let q = self.queue_for(run.org_id, run.project_id);
+        let mut guard = q.lock().await;
+        guard.push_back(run);
+    }
+
+    async fn emit_scheduler_event(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        topic: &str,
+        payload: Value,
+    ) {
+        let dedupe_key = format!(
+            "{}:{}:{}:{}",
+            topic,
+            org_id,
+            project_id,
+            ulid::Ulid::new().to_string()
+        );
+
+        let ev = match Event::new(
+            org_id.to_string(),
+            Some(project_id.to_string()),
+            EventDirection::Outbound,
+            topic.to_string(),
+            "core_scheduler".to_string(),
+            payload,
+            dedupe_key,
+            serde_json::json!({}),
+            None,
+        ) {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed building scheduler event");
+                return;
+            }
+        };
+
+        if let Err(err) = self.event_bus.publish(ev).await {
+            tracing::warn!(error = %err, "failed publishing scheduler event");
+        }
+    }
+}
+
+fn is_due(next_run_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    next_run_at.map(|t| t <= now).unwrap_or(true)
+}
+
+fn next_cron_after(expr: &str, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
+    let schedule = Schedule::from_str(expr)
+        .map_err(|e| Error::InvalidInput(format!("invalid cron expression '{expr}': {e}")))?;
+    Ok(schedule.after(&now).take(1).next())
 }

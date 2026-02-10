@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -58,6 +59,7 @@ pub struct CoreAgentsExecutor {
     agents: Arc<RwLock<HashMap<String, Arc<dyn AgentSpec>>>>,
     credential_manager: Option<Arc<CredentialManager>>,
     mcp_scope_provider: Option<Arc<dyn McpScopeProvider>>,
+    ensured_action_schema: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl CoreAgentsExecutor {
@@ -78,6 +80,7 @@ impl CoreAgentsExecutor {
             agents: Arc::new(RwLock::new(HashMap::new())),
             credential_manager: None,
             mcp_scope_provider: None,
+            ensured_action_schema: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -104,6 +107,20 @@ impl CoreAgentsExecutor {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn ensure_schema(&self, org_id: OrgId, handle: &ProjectDbHandle) -> Result<()> {
         ensure_handle_org(handle, org_id)?;
+        let key = format!("{}:{}", org_id.to_string(), handle.project_id.to_string());
+        {
+            let ensured = self.ensured_action_schema.lock().await;
+            if ensured.contains(&key) {
+                return Ok(());
+            }
+        }
+
+        // Serialize DDL (especially DROP INDEX) to avoid `SQLITE_BUSY`/locking failures under
+        // concurrent readers/writers.
+        let mut ensured = self.ensured_action_schema.lock().await;
+        if ensured.contains(&key) {
+            return Ok(());
+        }
         for stmt in ACTIONS_TABLE_DDL
             .split(';')
             .map(str::trim)
@@ -111,6 +128,7 @@ impl CoreAgentsExecutor {
         {
             self.project_db.execute(org_id, handle, stmt, &[]).await?;
         }
+        ensured.insert(key);
         Ok(())
     }
 
@@ -404,7 +422,12 @@ SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
     ) -> Result<()> {
         let (_mode, policy) = self
             .policy_store
-            .get_policy(org_id, project_db, &proposal.action_type, proposal.risk_level)
+            .get_policy(
+                org_id,
+                project_db,
+                &proposal.action_type,
+                proposal.risk_level,
+            )
             .await?;
 
         let required_scopes = policy.mcp_scopes.clone().unwrap_or_default();
@@ -545,6 +568,7 @@ impl CoreAgents for CoreAgentsExecutor {
         };
 
         let outcome = agent.run(ctx, inputs).await?;
+        let outcome_value = outcome.result().cloned();
         let proposals = outcome.proposals();
 
         let mut proposed_action_ids = Vec::with_capacity(proposals.len());
@@ -564,6 +588,7 @@ impl CoreAgents for CoreAgentsExecutor {
             started_at,
             finished_at,
             proposed_action_ids,
+            outcome: outcome_value,
         };
 
         self.audit(AuditEntry {

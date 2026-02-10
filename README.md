@@ -11,6 +11,7 @@
   </p>
   <p>
     <a href="#quickstart">Quickstart</a> ·
+    <a href="#built-on-horizons">Built on Horizons</a> ·
     <a href="#features">Features</a> ·
     <a href="#install-the-sdks">Install the SDKs</a> ·
     <a href="#from-source">From source</a> ·
@@ -20,6 +21,21 @@
 </div>
 
 ---
+
+## SDLC Usage (Internal Development)
+
+For internal PR workflows, run SDLC gates from `../synth-bazel`:
+
+```bash
+cd ../synth-bazel
+./scripts/ci_dev_gate.sh
+```
+
+If integration dependencies are unavailable locally:
+
+```bash
+./scripts/ci_dev_gate.sh --skip-integration
+```
 
 ## Features
 
@@ -129,6 +145,69 @@ horizons serve
 curl http://localhost:8000/health
 ```
 
+### Golden path: first agent + approval + audit
+
+Use this flow to validate the core execution loop in minutes:
+
+1. Start server and create an API key
+2. Create a project
+3. Run an agent
+4. Propose an action
+5. Approve the action
+6. Inspect pending actions and audit trail
+
+```bash
+# Set tenant + auth
+ORG_ID=$(uuidgen)
+horizons create-api-key --org-id "$ORG_ID" --name dev
+HORIZONS_API_KEY="hzn_..."
+
+# Create project
+PROJECT_JSON=$(curl -sS -X POST "http://localhost:8000/api/v1/projects" \
+  -H "Authorization: Bearer $HORIZONS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}')
+PROJECT_ID=$(printf '%s' "$PROJECT_JSON" | jq -r '.project_id')
+
+# Run a simple agent
+curl -sS -X POST "http://localhost:8000/api/v1/agents/run" \
+  -H "Authorization: Bearer $HORIZONS_API_KEY" \
+  -H "x-project-id: $PROJECT_ID" \
+  -H "x-agent-id: agent:demo" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"dev.noop","inputs":{"prompt":"hello"}}'
+
+# Propose an action
+ACTION_ID=$(curl -sS -X POST "http://localhost:8000/api/v1/actions/propose" \
+  -H "Authorization: Bearer $HORIZONS_API_KEY" \
+  -H "x-project-id: $PROJECT_ID" \
+  -H "x-agent-id: agent:demo" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id":"agent:demo",
+    "action_type":"demo.notify",
+    "payload":{"message":"hello from readme"},
+    "risk_level":"low",
+    "context":{"source":"readme"},
+    "dedupe_key":"readme-demo-action-v1"
+  }' | jq -r '.action_id')
+
+# Approve action
+curl -sS -X POST "http://localhost:8000/api/v1/actions/$ACTION_ID/approve" \
+  -H "Authorization: Bearer $HORIZONS_API_KEY" \
+  -H "x-project-id: $PROJECT_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"readme demo"}'
+
+# Verify queue + audit
+curl -sS "http://localhost:8000/api/v1/actions/pending?limit=20" \
+  -H "Authorization: Bearer $HORIZONS_API_KEY" \
+  -H "x-project-id: $PROJECT_ID"
+curl -sS "http://localhost:8000/api/v1/audit?limit=20" \
+  -H "Authorization: Bearer $HORIZONS_API_KEY" \
+  -H "x-project-id: $PROJECT_ID"
+```
+
 ### Auth (recommended for any mutating API calls)
 
 By default, mutating requests under `/api/v1/*` (POST/PUT/PATCH/DELETE) require verified auth.
@@ -176,6 +255,32 @@ horizons check              # Health check configured backends
 
 - Default: local `python3` subprocess.
 - Optional: embedded interpreter via [pydantic/monty](https://github.com/pydantic/monty) (requires `--features graph_monty` and `HORIZONS_GRAPH_PYTHON_BACKEND=monty`).
+
+---
+
+## Built on Horizons
+
+Real applications are already running on top of Horizons as the control plane.
+
+### OpenRevenue (public)
+
+Revenue operations app built on Horizons traits and APIs:
+- signal ingestion + scoring
+- context refresh connectors
+- agent sessions with streaming progress
+- action approvals and audit workflow
+
+Repo: [OpenRevenue](https://github.com/synth-laboratories/OpenRevenue)
+
+### Dhakka (private/internal)
+
+Personal ops + communication app built as a separate workspace on Horizons:
+- iMessage/email/calendar connectors
+- permissioned actions via approvals
+- outbox/event-driven execution
+- one-command local startup (`./run.sh`)
+
+Local repo: `../Dhakka` (see `README.md` there)
 
 ---
 

@@ -100,10 +100,15 @@ async fn post_call(
         .request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Near-term hardening:
-    // - identity is derived from verified auth (mutating routes require auth by default)
-    // - do not trust caller-supplied scopes; scope assignment should come from grants/policy
-    let requested_scopes: Vec<String> = Vec::new();
+    // Scope enforcement: the caller does not get to pick scopes; scopes are policy/config-driven.
+    let requested_scopes: Vec<String> = std::env::var("HORIZONS_MCP_CALL_SCOPES")
+        .ok()
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
 
     let call = McpToolCall::new(
         req.tool_name,

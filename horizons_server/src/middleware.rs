@@ -58,6 +58,8 @@ pub async fn require_auth_for_mutating(req: Request<Body>, next: Next) -> Respon
         return next.run(req).await;
     }
 
-    ApiError::Core(CoreError::Unauthorized("auth provider not configured".to_string()))
-        .into_response()
+    ApiError::Core(CoreError::Unauthorized(
+        "auth provider not configured".to_string(),
+    ))
+    .into_response()
 }

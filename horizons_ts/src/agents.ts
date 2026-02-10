@@ -1,9 +1,11 @@
 import { HorizonsClient, HorizonsError } from "./client";
 import { AgentRunResult } from "./types";
 
+/** Agent execution API (run, stream chat, list registered agents). */
 export class AgentsAPI {
   constructor(private client: HorizonsClient) {}
 
+  /** Run an agent once and return the run result. */
   async run(agent_id: string, inputs?: unknown, project_id?: string): Promise<AgentRunResult> {
     const body: Record<string, unknown> = { agent_id };
     if (inputs !== undefined) body.inputs = inputs;
@@ -16,6 +18,7 @@ export class AgentsAPI {
     return resp.result;
   }
 
+  /** Stream agent chat events from `/api/v1/agents/chat` via SSE. */
   async *chatStream(agent_id: string, inputs?: unknown, project_id?: string): AsyncGenerator<Record<string, unknown>> {
     const body: Record<string, unknown> = { agent_id };
     if (inputs !== undefined) body.inputs = inputs;
@@ -52,6 +55,7 @@ export class AgentsAPI {
     }
   }
 
+  /** List registered agent identifiers. */
   async listRegistered(): Promise<string[]> {
     return await this.client.request<string[]>("/api/v1/agents", { method: "GET" });
   }

@@ -1,6 +1,6 @@
 use axum::Router;
-use axum::routing::get;
 use axum::middleware;
+use axum::routing::get;
 
 pub mod actions;
 pub mod agents;
@@ -8,6 +8,7 @@ pub mod assets;
 pub mod audit;
 pub mod config;
 pub mod context_refresh;
+pub mod core_agents;
 pub mod credentials;
 pub mod engine;
 #[cfg(feature = "evaluation")]
@@ -20,10 +21,12 @@ pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
 pub mod onboard;
+pub mod orgs;
 #[cfg(feature = "optimization")]
 pub mod optimization;
 pub mod pipelines;
 pub mod projects;
+pub mod tick;
 
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn router() -> Router {
@@ -38,6 +41,7 @@ fn api_v1_router() -> Router {
         "/api/v1",
         Router::new()
             .route("/health", get(health::get_health))
+            .merge(orgs::router())
             .merge(projects::router())
             .merge(onboard::router())
             .merge(filestore::router())
@@ -45,6 +49,8 @@ fn api_v1_router() -> Router {
             .merge(events::api_router())
             .merge(context_refresh::router())
             .merge(agents::router())
+            .merge(core_agents::router())
+            .merge(tick::router())
             .merge(actions::router())
             .merge(pipelines::router())
             .merge(engine::router())
@@ -54,7 +60,9 @@ fn api_v1_router() -> Router {
             .merge(assets::router())
             .merge(credentials::router())
             .merge(config::router())
-            .layer(middleware::from_fn(crate::middleware::require_auth_for_mutating)),
+            .layer(middleware::from_fn(
+                crate::middleware::require_auth_for_mutating,
+            )),
     )
 }
 

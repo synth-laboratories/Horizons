@@ -7,6 +7,7 @@ use axum::{Extension, Router};
 use horizons_core::context_refresh::traits::ContextRefresh;
 use horizons_core::core_agents::executor::CoreAgentsExecutor;
 use horizons_core::core_agents::mcp_gateway::McpGateway;
+use horizons_core::core_agents::scheduler::CoreScheduler;
 use horizons_core::engine::sandbox_runtime::SandboxRuntime;
 #[cfg(feature = "evaluation")]
 use horizons_core::evaluation::engine::EvaluationEngine;
@@ -42,6 +43,7 @@ pub struct AppState {
     pub event_bus: Arc<dyn EventBus>,
     pub context_refresh: Arc<dyn ContextRefresh>,
     pub core_agents: Arc<CoreAgentsExecutor>,
+    pub core_scheduler: Arc<CoreScheduler>,
     pub pipelines: Arc<dyn PipelineRunner>,
     /// Optional credential manager for `$cred:` resolution and credential CRUD routes.
     pub credential_manager: Option<Arc<CredentialManager>>,
@@ -74,6 +76,7 @@ impl AppState {
         event_bus: Arc<dyn EventBus>,
         context_refresh: Arc<dyn ContextRefresh>,
         core_agents: Arc<CoreAgentsExecutor>,
+        core_scheduler: Arc<CoreScheduler>,
         pipelines: Arc<dyn PipelineRunner>,
         credential_manager: Option<Arc<CredentialManager>>,
         mcp_gateway: Option<Arc<McpGateway>>,
@@ -95,6 +98,7 @@ impl AppState {
             event_bus,
             context_refresh,
             core_agents,
+            core_scheduler,
             pipelines,
             credential_manager,
             mcp_gateway,
@@ -157,6 +161,99 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
         tokio::spawn(async move {
             monitor.run(cancel).await;
         });
+    }
+
+    // Self-driving scheduler background loop (opt-in).
+    let scheduler_enabled = std::env::var("HORIZONS_CORE_SCHEDULER_ENABLED")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    if scheduler_enabled {
+        let tick_ms: u64 = std::env::var("HORIZONS_CORE_SCHEDULER_TICK_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000);
+        let max_runs_per_tick: usize = std::env::var("HORIZONS_CORE_SCHEDULER_MAX_RUNS_PER_TICK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+
+        let scheduler = state.core_scheduler.clone();
+        let central_db = state.central_db.clone();
+        let project_db = state.project_db.clone();
+
+        tokio::spawn(async move {
+            tracing::info!(
+                tick_ms,
+                max_runs_per_tick,
+                "core scheduler background loop started"
+            );
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+            loop {
+                interval.tick().await;
+                let now = chrono::Utc::now();
+
+                // List orgs (best-effort pagination).
+                let mut offset = 0usize;
+                loop {
+                    let orgs = match central_db
+                        .list_orgs(horizons_core::onboard::models::ListQuery { limit: 100, offset })
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "scheduler failed listing orgs");
+                            break;
+                        }
+                    };
+                    if orgs.is_empty() {
+                        break;
+                    }
+
+                    let org_count = orgs.len();
+                    for org in orgs {
+                        // List projects for org (best-effort pagination).
+                        let mut poffset = 0usize;
+                        loop {
+                            let projects = match project_db
+                                .list_projects(
+                                    org.org_id,
+                                    horizons_core::onboard::models::ListQuery {
+                                        limit: 200,
+                                        offset: poffset,
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(org_id = %org.org_id, error = %e, "scheduler failed listing projects");
+                                    break;
+                                }
+                            };
+                            if projects.is_empty() {
+                                break;
+                            }
+
+                            let project_count = projects.len();
+                            for p in projects {
+                                let _ = scheduler
+                                    .tick_project(org.org_id, p.project_id, now, max_runs_per_tick)
+                                    .await;
+                            }
+
+                            poffset += project_count;
+                        }
+                    }
+
+                    offset += org_count;
+                }
+            }
+        });
+    } else {
+        tracing::info!(
+            "core scheduler background loop disabled (HORIZONS_CORE_SCHEDULER_ENABLED=false)"
+        );
     }
 
     let app = router(state);

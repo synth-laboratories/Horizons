@@ -8,12 +8,15 @@ from . import models
 
 
 class AgentsAPI:
+    """Agent execution API methods."""
+
     def __init__(self, client: HorizonsClient) -> None:
         self._client = client
 
     async def run(
         self, *, agent_id: str, inputs: Optional[Dict[str, Any]] = None, project_id: Optional[UUID] = None
     ) -> models.AgentRunResult:
+        """Run an agent once and return the typed run result."""
         body: Dict[str, Any] = {"agent_id": agent_id}
         if inputs is not None:
             body["inputs"] = inputs
@@ -30,6 +33,7 @@ class AgentsAPI:
         inputs: Optional[Dict[str, Any]] = None,
         project_id: Optional[UUID] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
+        """Stream agent chat events from `/api/v1/agents/chat` (SSE)."""
         body: Dict[str, Any] = {"agent_id": agent_id}
         if inputs is not None:
             body["inputs"] = inputs
@@ -39,6 +43,7 @@ class AgentsAPI:
             yield event
 
     async def list_registered(self) -> List[str]:
+        """List registered agent identifiers for the current tenant scope."""
         resp = await self._client._request("GET", "/api/v1/agents")
         data = await self._client.json(resp)
         return list(data)

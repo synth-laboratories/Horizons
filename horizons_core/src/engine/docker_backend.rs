@@ -24,12 +24,15 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Sandbox-agent install script run inside the container.
-/// Downloads the latest release binary and makes it executable.
+///
+/// Notes:
+/// - On Apple Silicon, we run the container as `linux/amd64` because upstream only
+///   publishes an x86_64 Linux binary today.
+/// - `install.sh` installs to `/usr/local/bin/sandbox-agent` by default.
 const INSTALL_SCRIPT: &str = r#"
 set -e
-apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1
-curl -fsSL https://github.com/rivet-dev/sandbox-agent/releases/latest/download/sandbox-agent-$(uname -m)-unknown-linux-gnu -o /usr/local/bin/sandbox-agent
-chmod +x /usr/local/bin/sandbox-agent
+apt-get update -qq && apt-get install -y -qq curl ca-certificates jq > /dev/null 2>&1
+curl -fsSL https://releases.rivet.dev/sandbox-agent/latest/install.sh | sh
 "#;
 
 /// Docker-based sandbox backend.
@@ -69,15 +72,19 @@ impl DockerBackend {
     /// Build the setup script that installs sandbox-agent and starts it.
     fn setup_script(config: &SandboxConfig) -> String {
         let agent = config.agent.as_sandbox_agent_str();
-        let permission_mode = config.permission_mode.as_str();
         let no_token_flag = "--no-token";
 
         // Install sandbox-agent, install the agent, then start the server.
         format!(
             r#"
 {INSTALL_SCRIPT}
-sandbox-agent install {agent} 2>&1 || true
-sandbox-agent start {no_token_flag} --permission-mode {permission_mode} &
+sandbox-agent install-agent {agent} 2>&1 || true
+if [ "{agent}" = "codex" ] && [ -n "${{OPENAI_API_KEY:-}}" ] && [ -x "/root/.local/share/sandbox-agent/bin/codex" ]; then
+  # Codex CLI expects credentials to be "logged in" (stored on disk) rather than only reading env.
+  # Best-effort: seed it from OPENAI_API_KEY so sandbox sessions work out of the box.
+  printf '%s' "$OPENAI_API_KEY" | /root/.local/share/sandbox-agent/bin/codex login --with-api-key > /dev/null 2>&1 || true
+fi
+sandbox-agent server {no_token_flag} --host 0.0.0.0 --port {SANDBOX_AGENT_PORT} &
 # Wait for the server to be listening
 for i in $(seq 1 30); do
     if curl -sf http://127.0.0.1:{SANDBOX_AGENT_PORT}/v1/health > /dev/null 2>&1; then
@@ -108,6 +115,27 @@ impl SandboxBackend for DockerBackend {
             "-p".to_string(),
             format!("{host_port}:{SANDBOX_AGENT_PORT}"),
         ];
+
+        // sandbox-agent currently publishes Linux x86_64 binaries only. On Apple Silicon,
+        // default Docker images are `linux/arm64` which cannot execute those binaries.
+        // Force an amd64 container so the installer works under QEMU emulation.
+        //
+        // Override with HORIZONS_DOCKER_PLATFORM if you need something different.
+        let platform = std::env::var("HORIZONS_DOCKER_PLATFORM")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if std::env::consts::ARCH == "aarch64" {
+                    Some("linux/amd64".to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(p) = platform {
+            args.push("--platform".to_string());
+            args.push(p);
+        }
 
         // Attach to Docker network if configured.
         if let Some(net) = &self.network {

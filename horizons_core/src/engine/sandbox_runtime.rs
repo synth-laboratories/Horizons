@@ -137,6 +137,7 @@ impl SandboxRuntime {
         let mut session_ended = false;
         let mut final_output: Option<String> = None;
         let mut error_msg: Option<String> = None;
+        let mut turn_ended = false;
 
         let timeout_deadline =
             tokio::time::Instant::now() + Duration::from_secs(config.timeout_seconds);
@@ -181,6 +182,28 @@ impl SandboxRuntime {
                             }
                         }
                     }
+                    "turn.ended" => {
+                        // Many agent adapters keep sessions open for multi-turn usage and only
+                        // emit `turn.ended`. For one-shot runs (engine/run), treat end-of-turn as
+                        // completion and terminate the session ourselves.
+                        turn_ended = true;
+
+                        if let Some(data) = event_json.get("data") {
+                            // Best-effort: capture adapter error message if present.
+                            if let Some(meta) = data.get("metadata") {
+                                if let Some(status) = meta.get("status").and_then(|v| v.as_str()) {
+                                    if status == "failed" {
+                                        error_msg = meta
+                                            .get("error")
+                                            .and_then(|e| e.get("message"))
+                                            .and_then(|m| m.as_str())
+                                            .map(|s| s.to_string())
+                                            .or(error_msg);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "permission.requested" => {
                         // Auto-approve permissions in bypass mode.
                         if config.permission_mode == PermissionMode::Bypass {
@@ -196,10 +219,12 @@ impl SandboxRuntime {
                         }
                     }
                     "item.completed" => {
-                        // Try to extract final text output from the last completed item.
+                        // Try to extract final text output from the last completed assistant item.
                         if let Some(data) = event_json.get("data") {
                             if let Some(item) = data.get("item") {
-                                if let Some(content) =
+                                if item.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                                    // Ignore user echoes (some adapters emit user items only).
+                                } else if let Some(content) =
                                     item.get("content").and_then(|c| c.as_array())
                                 {
                                     for part in content {
@@ -222,7 +247,10 @@ impl SandboxRuntime {
                 all_events.push(event_json.clone());
             }
 
-            if session_ended {
+            if session_ended || turn_ended {
+                if turn_ended && !session_ended {
+                    let _ = client.terminate_session(&session_id).await;
+                }
                 tracing::info!("session ended, collected {} events", all_events.len());
                 break;
             }
@@ -232,7 +260,7 @@ impl SandboxRuntime {
 
         Ok(SandboxResult {
             events: all_events,
-            completed: session_ended && error_msg.is_none(),
+            completed: (session_ended || turn_ended) && error_msg.is_none(),
             duration_seconds: 0.0, // Caller fills this in.
             final_output,
             error: error_msg,

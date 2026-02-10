@@ -9,9 +9,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub use crate::onboard::models::{
-    ApiKeyRecord, AuditQuery, ConnectorCredential, ListQuery, OperationRecord, OperationRunRecord,
-    OrgRecord, ProjectDbParam, ProjectDbRow, ProjectDbRowExt, ProjectDbValue, ResourceRecord,
-    SyncState, SyncStateKey, UserRecord, UserRole, VectorMatch, project_db_migrate,
+    ApiKeyRecord, AuditQuery, ConnectorCredential, CoreAgentEventCursor, CoreAgentRecord,
+    ListQuery, OperationRecord, OperationRunRecord, OrgRecord, ProjectRecord, ProjectDbParam,
+    ProjectDbRow, ProjectDbRowExt, ProjectDbValue, ResourceRecord, SyncState, SyncStateKey,
+    UserRecord, UserRole, VectorMatch, project_db_migrate,
 };
 
 /// Stream of bytes messages (e.g. Redis pub/sub).
@@ -23,10 +24,22 @@ pub type BytesStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static
 pub trait CentralDb: Send + Sync {
     async fn upsert_org(&self, org: &OrgRecord) -> Result<()>;
     async fn get_org(&self, org_id: OrgId) -> Result<Option<OrgRecord>>;
+    async fn list_orgs(&self, query: ListQuery) -> Result<Vec<OrgRecord>>;
 
     async fn upsert_user(&self, user: &UserRecord) -> Result<()>;
     async fn get_user(&self, org_id: OrgId, user_id: Uuid) -> Result<Option<UserRecord>>;
     async fn list_users(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<UserRecord>>;
+
+    // Projects (slug mapping + consumer-facing identifiers).
+    async fn upsert_project(&self, project: &ProjectRecord) -> Result<()>;
+    async fn get_project_by_id(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+    ) -> Result<Option<ProjectRecord>>;
+    async fn get_project_by_slug(&self, org_id: OrgId, slug: &str)
+    -> Result<Option<ProjectRecord>>;
+    async fn list_projects(&self, org_id: OrgId, query: ListQuery) -> Result<Vec<ProjectRecord>>;
 
     // Authn: API keys (bearer tokens).
     async fn upsert_api_key(&self, key: &ApiKeyRecord) -> Result<()>;
@@ -83,6 +96,43 @@ pub trait CentralDb: Send + Sync {
         operation_id: Option<&str>,
         query: ListQuery,
     ) -> Result<Vec<OperationRunRecord>>;
+
+    // Core agents (System 2) persistent registry.
+    async fn upsert_core_agent(&self, agent: &CoreAgentRecord) -> Result<()>;
+    async fn get_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> Result<Option<CoreAgentRecord>>;
+    async fn list_core_agents(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        query: ListQuery,
+    ) -> Result<Vec<CoreAgentRecord>>;
+    async fn delete_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> Result<()>;
+    async fn set_core_agents_time_enabled(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        enabled: bool,
+    ) -> Result<u64>;
+
+    // `on_event` scheduling cursors (durable high-water marks).
+    async fn upsert_core_agent_event_cursor(&self, cursor: &CoreAgentEventCursor) -> Result<()>;
+    async fn get_core_agent_event_cursor(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+        topic: &str,
+    ) -> Result<Option<CoreAgentEventCursor>>;
 
     async fn upsert_sync_state(&self, state: &SyncState) -> Result<()>;
     async fn get_sync_state(&self, key: &SyncStateKey) -> Result<Option<SyncState>>;

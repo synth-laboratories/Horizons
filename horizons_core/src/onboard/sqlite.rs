@@ -18,8 +18,9 @@ use crate::context_refresh::models::{
 use crate::error::{Error as CoreError, Result as CoreResult};
 use crate::models::{AgentIdentity, AuditEntry, OrgId, PlatformConfig, ProjectDbHandle, ProjectId};
 use crate::onboard::models::{
-    ApiKeyRecord, AuditQuery, ConnectorCredential, ListQuery, OperationRecord, OperationRunRecord,
-    ResourceRecord, SyncState, SyncStateKey,
+    ApiKeyRecord, AuditQuery, ConnectorCredential, CoreAgentEventCursor, CoreAgentRecord,
+    ListQuery, OperationRecord, OperationRunRecord, ProjectRecord, ResourceRecord, SyncState,
+    SyncStateKey,
 };
 use crate::onboard::traits::{CentralDb, OrgRecord, UserRecord, UserRole};
 
@@ -89,6 +90,17 @@ CREATE TABLE IF NOT EXISTS users (
     PRIMARY KEY (org_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS projects (
+    org_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (org_id, project_id),
+    UNIQUE (org_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS projects_org_created_at_idx ON projects(org_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS api_keys (
     key_id TEXT PRIMARY KEY,
     org_id TEXT NOT NULL,
@@ -129,6 +141,39 @@ CREATE TABLE IF NOT EXISTS connector_credentials (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (org_id, connector_id)
 );
+
+CREATE TABLE IF NOT EXISTS core_agents (
+    org_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    sandbox_image TEXT,
+    tools_json TEXT NOT NULL,
+    schedule_type TEXT,
+    schedule_json TEXT,
+    enabled INTEGER NOT NULL,
+    next_run_at TEXT,
+    config_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (org_id, project_id, agent_id)
+);
+
+CREATE INDEX IF NOT EXISTS core_agents_org_project_idx ON core_agents(org_id, project_id);
+
+CREATE TABLE IF NOT EXISTS core_agent_event_cursors (
+    org_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    last_seen_received_at TEXT NOT NULL,
+    last_seen_event_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (org_id, project_id, agent_id, topic)
+);
+
+CREATE INDEX IF NOT EXISTS core_agent_event_cursors_org_project_idx
+  ON core_agent_event_cursors(org_id, project_id);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     key_str TEXT PRIMARY KEY,
@@ -235,6 +280,19 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
     s.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now())
 }
 
+fn row_to_project(r: &sqlx::sqlite::SqliteRow) -> ProjectRecord {
+    let org_id_str: String = r.get("org_id");
+    let project_id_str: String = r.get("project_id");
+    let slug: String = r.get("slug");
+    let created_at_str: String = r.get("created_at");
+    ProjectRecord {
+        org_id: parse_org_id(&org_id_str),
+        project_id: parse_project_id(&project_id_str),
+        slug,
+        created_at: parse_dt(&created_at_str),
+    }
+}
+
 // ── CentralDb impl ─────────────────────────────────────────────
 
 #[async_trait]
@@ -270,6 +328,33 @@ impl CentralDb for SqliteCentralDb {
                 created_at: parse_dt(&created_at_str),
             }
         }))
+    }
+
+    async fn list_orgs(&self, query: ListQuery) -> CoreResult<Vec<OrgRecord>> {
+        let rows = sqlx::query(
+            "SELECT org_id, name, created_at FROM orgs
+             ORDER BY created_at, org_id
+             LIMIT ?1 OFFSET ?2",
+        )
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let org_id_str: String = r.get("org_id");
+                let name: String = r.get("name");
+                let created_at_str: String = r.get("created_at");
+                OrgRecord {
+                    org_id: parse_org_id(&org_id_str),
+                    name,
+                    created_at: parse_dt(&created_at_str),
+                }
+            })
+            .collect())
     }
 
     async fn upsert_user(&self, user: &UserRecord) -> CoreResult<()> {
@@ -322,6 +407,79 @@ impl CentralDb for SqliteCentralDb {
         .map_err(db_err)?;
 
         Ok(rows.iter().map(row_to_user).collect())
+    }
+
+    async fn upsert_project(&self, project: &ProjectRecord) -> CoreResult<()> {
+        if project.slug.trim().is_empty() {
+            return Err(CoreError::InvalidInput("project slug is empty".to_string()));
+        }
+        sqlx::query(
+            "INSERT INTO projects (org_id, project_id, slug, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(org_id, project_id) DO UPDATE SET slug = excluded.slug",
+        )
+        .bind(project.org_id.to_string())
+        .bind(project.project_id.to_string())
+        .bind(project.slug.trim())
+        .bind(project.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_project_by_id(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+    ) -> CoreResult<Option<ProjectRecord>> {
+        let row = sqlx::query(
+            "SELECT org_id, project_id, slug, created_at
+             FROM projects WHERE org_id = ?1 AND project_id = ?2",
+        )
+        .bind(org_id.to_string())
+        .bind(project_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.as_ref().map(row_to_project))
+    }
+
+    async fn get_project_by_slug(
+        &self,
+        org_id: OrgId,
+        slug: &str,
+    ) -> CoreResult<Option<ProjectRecord>> {
+        let row = sqlx::query(
+            "SELECT org_id, project_id, slug, created_at
+             FROM projects WHERE org_id = ?1 AND slug = ?2",
+        )
+        .bind(org_id.to_string())
+        .bind(slug.trim())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.as_ref().map(row_to_project))
+    }
+
+    async fn list_projects(
+        &self,
+        org_id: OrgId,
+        query: ListQuery,
+    ) -> CoreResult<Vec<ProjectRecord>> {
+        let rows = sqlx::query(
+            "SELECT org_id, project_id, slug, created_at
+             FROM projects WHERE org_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2 OFFSET ?3",
+        )
+        .bind(org_id.to_string())
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.iter().map(row_to_project).collect())
     }
 
     async fn upsert_api_key(&self, key: &ApiKeyRecord) -> CoreResult<()> {
@@ -977,6 +1135,251 @@ impl CentralDb for SqliteCentralDb {
             .collect())
     }
 
+    async fn upsert_core_agent(&self, agent: &CoreAgentRecord) -> CoreResult<()> {
+        let schedule_type = agent.schedule.as_ref().map(|s| match s {
+            crate::core_agents::models::AgentSchedule::Cron(_) => "cron",
+            crate::core_agents::models::AgentSchedule::Interval { .. } => "interval",
+            crate::core_agents::models::AgentSchedule::OnEvent { .. } => "on_event",
+            crate::core_agents::models::AgentSchedule::OnDemand => "on_demand",
+        });
+
+        sqlx::query(
+            "INSERT INTO core_agents (org_id, project_id, agent_id, name, sandbox_image, tools_json, schedule_type, schedule_json, enabled, next_run_at, config_json, created_at, updated_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)\n             ON CONFLICT(org_id, project_id, agent_id) DO UPDATE SET\n               name = excluded.name,\n               sandbox_image = excluded.sandbox_image,\n               tools_json = excluded.tools_json,\n               schedule_type = excluded.schedule_type,\n               schedule_json = excluded.schedule_json,\n               enabled = excluded.enabled,\n               next_run_at = excluded.next_run_at,\n               config_json = excluded.config_json,\n               updated_at = excluded.updated_at",
+        )
+        .bind(agent.org_id.to_string())
+        .bind(agent.project_id.to_string())
+        .bind(&agent.agent_id)
+        .bind(&agent.name)
+        .bind(&agent.sandbox_image)
+        .bind(serde_json::to_string(&agent.tools).unwrap_or_else(|_| "[]".to_string()))
+        .bind(schedule_type)
+        .bind(
+            agent
+                .schedule
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok()),
+        )
+        .bind(if agent.enabled { 1i64 } else { 0i64 })
+        .bind(agent.next_run_at.map(|dt| dt.to_rfc3339()))
+        .bind(serde_json::to_string(&agent.config).unwrap_or_else(|_| "{}".to_string()))
+        .bind(agent.created_at.to_rfc3339())
+        .bind(agent.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> CoreResult<Option<CoreAgentRecord>> {
+        let row = sqlx::query(
+            "SELECT org_id, project_id, agent_id, name, sandbox_image, tools_json, schedule_json, enabled, next_run_at, config_json, created_at, updated_at\n             FROM core_agents WHERE org_id = ?1 AND project_id = ?2 AND agent_id = ?3",
+        )
+        .bind(org_id.to_string())
+        .bind(project_id.to_string())
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        Ok(row.map(|r| {
+            let org_id_str: String = r.get("org_id");
+            let project_id_str: String = r.get("project_id");
+            let agent_id: String = r.get("agent_id");
+            let name: String = r.get("name");
+            let sandbox_image: Option<String> = r.get("sandbox_image");
+            let tools_str: String = r.get("tools_json");
+            let schedule_str: Option<String> = r.get("schedule_json");
+            let enabled_i: i64 = r.get("enabled");
+            let next_run_at_str: Option<String> = r.get("next_run_at");
+            let config_str: String = r.get("config_json");
+            let created_at_str: String = r.get("created_at");
+            let updated_at_str: String = r.get("updated_at");
+
+            let tools: Vec<String> = serde_json::from_str(&tools_str).unwrap_or_default();
+            let schedule = schedule_str.as_deref().and_then(|s| {
+                serde_json::from_str::<crate::core_agents::models::AgentSchedule>(s).ok()
+            });
+            let config: serde_json::Value = serde_json::from_str(&config_str).unwrap_or_default();
+            let enabled = enabled_i != 0;
+            let next_run_at = next_run_at_str.as_deref().map(parse_dt);
+
+            CoreAgentRecord {
+                org_id: parse_org_id(&org_id_str),
+                project_id: parse_project_id(&project_id_str),
+                agent_id,
+                name,
+                sandbox_image,
+                tools,
+                schedule,
+                enabled,
+                next_run_at,
+                config,
+                created_at: parse_dt(&created_at_str),
+                updated_at: parse_dt(&updated_at_str),
+            }
+        }))
+    }
+
+    async fn list_core_agents(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        query: ListQuery,
+    ) -> CoreResult<Vec<CoreAgentRecord>> {
+        let rows = sqlx::query(
+            "SELECT org_id, project_id, agent_id, name, sandbox_image, tools_json, schedule_json, enabled, next_run_at, config_json, created_at, updated_at\n             FROM core_agents WHERE org_id = ?1 AND project_id = ?2\n             ORDER BY updated_at DESC, agent_id\n             LIMIT ?3 OFFSET ?4",
+        )
+        .bind(org_id.to_string())
+        .bind(project_id.to_string())
+        .bind(query.limit as i64)
+        .bind(query.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let org_id_str: String = r.get("org_id");
+                let project_id_str: String = r.get("project_id");
+                let agent_id: String = r.get("agent_id");
+                let name: String = r.get("name");
+                let sandbox_image: Option<String> = r.get("sandbox_image");
+                let tools_str: String = r.get("tools_json");
+                let schedule_str: Option<String> = r.get("schedule_json");
+                let enabled_i: i64 = r.get("enabled");
+                let next_run_at_str: Option<String> = r.get("next_run_at");
+                let config_str: String = r.get("config_json");
+                let created_at_str: String = r.get("created_at");
+                let updated_at_str: String = r.get("updated_at");
+
+                let tools: Vec<String> = serde_json::from_str(&tools_str).unwrap_or_default();
+                let schedule = schedule_str.as_deref().and_then(|s| {
+                    serde_json::from_str::<crate::core_agents::models::AgentSchedule>(s).ok()
+                });
+                let config: serde_json::Value =
+                    serde_json::from_str(&config_str).unwrap_or_default();
+                let enabled = enabled_i != 0;
+                let next_run_at = next_run_at_str.as_deref().map(parse_dt);
+
+                CoreAgentRecord {
+                    org_id: parse_org_id(&org_id_str),
+                    project_id: parse_project_id(&project_id_str),
+                    agent_id,
+                    name,
+                    sandbox_image,
+                    tools,
+                    schedule,
+                    enabled,
+                    next_run_at,
+                    config,
+                    created_at: parse_dt(&created_at_str),
+                    updated_at: parse_dt(&updated_at_str),
+                }
+            })
+            .collect())
+    }
+
+    async fn delete_core_agent(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+    ) -> CoreResult<()> {
+        sqlx::query(
+            "DELETE FROM core_agents WHERE org_id = ?1 AND project_id = ?2 AND agent_id = ?3",
+        )
+        .bind(org_id.to_string())
+        .bind(project_id.to_string())
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn set_core_agents_time_enabled(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        enabled: bool,
+    ) -> CoreResult<u64> {
+        let res = sqlx::query(
+            "UPDATE core_agents\n                SET enabled = ?3, updated_at = ?4\n              WHERE org_id = ?1 AND project_id = ?2\n                AND schedule_type IN ('cron','interval')",
+        )
+        .bind(org_id.to_string())
+        .bind(project_id.to_string())
+        .bind(if enabled { 1i64 } else { 0i64 })
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(res.rows_affected())
+    }
+
+    async fn upsert_core_agent_event_cursor(
+        &self,
+        cursor: &CoreAgentEventCursor,
+    ) -> CoreResult<()> {
+        sqlx::query(
+            "INSERT INTO core_agent_event_cursors (org_id, project_id, agent_id, topic, last_seen_received_at, last_seen_event_id, updated_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)\n             ON CONFLICT(org_id, project_id, agent_id, topic) DO UPDATE SET\n               last_seen_received_at = excluded.last_seen_received_at,\n               last_seen_event_id = excluded.last_seen_event_id,\n               updated_at = excluded.updated_at",
+        )
+        .bind(cursor.org_id.to_string())
+        .bind(cursor.project_id.to_string())
+        .bind(&cursor.agent_id)
+        .bind(&cursor.topic)
+        .bind(cursor.last_seen_received_at.to_rfc3339())
+        .bind(&cursor.last_seen_event_id)
+        .bind(cursor.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_core_agent_event_cursor(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        agent_id: &str,
+        topic: &str,
+    ) -> CoreResult<Option<CoreAgentEventCursor>> {
+        let row = sqlx::query(
+            "SELECT org_id, project_id, agent_id, topic, last_seen_received_at, last_seen_event_id, updated_at\n             FROM core_agent_event_cursors\n            WHERE org_id = ?1 AND project_id = ?2 AND agent_id = ?3 AND topic = ?4",
+        )
+        .bind(org_id.to_string())
+        .bind(project_id.to_string())
+        .bind(agent_id)
+        .bind(topic)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        Ok(row.map(|r| {
+            let org_id_str: String = r.get("org_id");
+            let project_id_str: String = r.get("project_id");
+            let agent_id: String = r.get("agent_id");
+            let topic: String = r.get("topic");
+            let last_seen_received_at_str: String = r.get("last_seen_received_at");
+            let last_seen_event_id: String = r.get("last_seen_event_id");
+            let updated_at_str: String = r.get("updated_at");
+            CoreAgentEventCursor {
+                org_id: parse_org_id(&org_id_str),
+                project_id: parse_project_id(&project_id_str),
+                agent_id,
+                topic,
+                last_seen_received_at: parse_dt(&last_seen_received_at_str),
+                last_seen_event_id,
+                updated_at: parse_dt(&updated_at_str),
+            }
+        }))
+    }
+
     async fn upsert_sync_state(&self, state: &SyncState) -> CoreResult<()> {
         let k = sync_state_key_string(&state.key);
         sqlx::query(
@@ -1028,7 +1431,8 @@ impl CentralDb for SqliteCentralDb {
             .map(|s| serde_json::to_string(s).unwrap_or_default());
         let event_triggers_json = serde_json::to_string(&source.event_triggers).unwrap_or_default();
         let project_db_json = serde_json::to_string(&source.project_db).unwrap_or_default();
-        let processor_json = serde_json::to_string(&source.processor).unwrap_or_else(|_| "{\"type\":\"connector\"}".to_string());
+        let processor_json = serde_json::to_string(&source.processor)
+            .unwrap_or_else(|_| "{\"type\":\"connector\"}".to_string());
         let settings_json = serde_json::to_string(&source.settings).unwrap_or_default();
 
         sqlx::query(
