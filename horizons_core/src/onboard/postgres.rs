@@ -26,10 +26,11 @@ pub struct PostgresCentralDb {
 impl PostgresCentralDb {
     #[tracing::instrument(level = "debug", skip(cfg))]
     pub async fn connect(cfg: &PostgresConfig) -> Result<Self> {
+        let pg_url = cfg.sqlx_url();
         let pool = PgPoolOptions::new()
             .max_connections(cfg.max_connections)
             .acquire_timeout(cfg.acquire_timeout)
-            .connect(&cfg.url)
+            .connect(&pg_url)
             .await
             .map_err(|e| Error::backend("connect postgres", e))?;
         Ok(Self { pool })
@@ -613,7 +614,11 @@ impl CentralDb for PostgresCentralDb {
         Ok(row.as_ref().map(Self::project_from_row).transpose()?)
     }
 
-    async fn get_project_by_slug(&self, org_id: OrgId, slug: &str) -> Result<Option<ProjectRecord>> {
+    async fn get_project_by_slug(
+        &self,
+        org_id: OrgId,
+        slug: &str,
+    ) -> Result<Option<ProjectRecord>> {
         let row = sqlx::query(
             "SELECT org_id, project_id, slug, created_at FROM projects WHERE org_id = $1 AND slug = $2",
         )
