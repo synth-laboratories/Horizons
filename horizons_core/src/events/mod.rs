@@ -5,6 +5,7 @@ mod error;
 pub mod bus;
 pub mod config;
 pub mod dlq;
+pub mod memory;
 pub mod models;
 pub mod operations;
 pub mod postgres;
