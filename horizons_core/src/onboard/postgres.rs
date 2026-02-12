@@ -26,10 +26,11 @@ pub struct PostgresCentralDb {
 impl PostgresCentralDb {
     #[tracing::instrument(level = "debug", skip(cfg))]
     pub async fn connect(cfg: &PostgresConfig) -> Result<Self> {
+        let pg_url = cfg.sqlx_url();
         let pool = PgPoolOptions::new()
             .max_connections(cfg.max_connections)
             .acquire_timeout(cfg.acquire_timeout)
-            .connect(&cfg.url)
+            .connect(&pg_url)
             .await
             .map_err(|e| Error::backend("connect postgres", e))?;
         Ok(Self { pool })
