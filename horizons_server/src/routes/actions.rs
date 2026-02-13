@@ -149,7 +149,10 @@ pub async fn approve_action(
     let project_id = req.as_ref().and_then(|r| r.project_id).or(project_id_h);
     if let Some(project_id) = project_id {
         let handle = resolve_project_handle(org_id, project_id, &state).await?;
-        let reason = req.as_ref().map(|r| r.reason.as_str()).unwrap_or("approved");
+        let reason = req
+            .as_ref()
+            .map(|r| r.reason.as_str())
+            .unwrap_or("approved");
         state
             .core_agents
             .approve(org_id, project_id, &handle, action_id, &identity, reason)
@@ -158,7 +161,10 @@ pub async fn approve_action(
     }
 
     // Fallback for older consumers: scan all org projects and approve the first match.
-    let reason = req.as_ref().map(|r| r.reason.as_str()).unwrap_or("approved");
+    let reason = req
+        .as_ref()
+        .map(|r| r.reason.as_str())
+        .unwrap_or("approved");
     let mut offset = 0usize;
     let scan_limit = std::env::var("HORIZONS_ACTION_APPROVE_SCAN_LIMIT")
         .ok()
@@ -263,7 +269,7 @@ pub async fn list_pending(
         (None, None) => {
             return Err(ApiError::InvalidInput(
                 "project_id (or project) is required".to_string(),
-            ))
+            ));
         }
     };
     let handle = resolve_project_handle(org_id, project_id, &state).await?;

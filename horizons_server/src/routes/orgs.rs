@@ -1,11 +1,11 @@
 use crate::error::ApiError;
 use crate::extract::MaybeOrgIdHeader;
 use crate::server::AppState;
-use axum::body::Bytes;
+use axum::Extension;
 use axum::Json;
+use axum::body::Bytes;
 use axum::http::HeaderMap;
 use axum::routing::post;
-use axum::Extension;
 use chrono::Utc;
 use horizons_core::models::OrgId;
 use horizons_core::onboard::traits::OrgRecord;
@@ -58,7 +58,10 @@ fn admin_token_ok(headers: &HeaderMap) -> bool {
     if let Some(got) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
         .map(|s| s.trim())
     {
         return got == expected;
@@ -87,12 +90,7 @@ pub async fn create_org(
     // If the caller is already authenticated into an org (bearer api key), treat this as
     // "ensure org exists" and return it. This keeps consumer provisioning flows ergonomic.
     if let Some(org_id) = org_id_h {
-        let name = req
-            .name
-            .as_deref()
-            .unwrap_or("org")
-            .trim()
-            .to_string();
+        let name = req.name.as_deref().unwrap_or("org").trim().to_string();
         state
             .central_db
             .upsert_org(&OrgRecord {
@@ -112,16 +110,16 @@ pub async fn create_org(
         )));
     }
 
-    let org_id = match req.org_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let org_id = match req
+        .org_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => OrgId::from_str(s).map_err(|e| ApiError::InvalidOrgId(e.to_string()))?,
         None => OrgId(Uuid::new_v4()),
     };
-    let name = req
-        .name
-        .as_deref()
-        .unwrap_or("org")
-        .trim()
-        .to_string();
+    let name = req.name.as_deref().unwrap_or("org").trim().to_string();
 
     state
         .central_db

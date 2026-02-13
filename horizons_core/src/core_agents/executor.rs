@@ -107,7 +107,7 @@ impl CoreAgentsExecutor {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn ensure_schema(&self, org_id: OrgId, handle: &ProjectDbHandle) -> Result<()> {
         ensure_handle_org(handle, org_id)?;
-        let key = format!("{}:{}", org_id.to_string(), handle.project_id.to_string());
+        let key = format!("{org_id}:{}", handle.project_id);
         {
             let ensured = self.ensured_action_schema.lock().await;
             if ensured.contains(&key) {

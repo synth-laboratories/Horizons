@@ -41,7 +41,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          # Keep this aligned with Cargo.lock MSRV constraints.
+          toolchain: 1.91.0
           targets: ${{ matrix.target }}
 
       - name: Rust cache

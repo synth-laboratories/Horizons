@@ -65,7 +65,12 @@ async fn resolve_project_id_from_query(
     org_id: OrgId,
     q: &ListEventsQuery,
 ) -> Result<(Option<String>, Option<String>), ApiError> {
-    if let Some(pid) = q.project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(pid) = q
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         // If the caller supplied a UUID string, we can also look up a slug for compat responses.
         let slug = if let Ok(uuid) = uuid::Uuid::parse_str(pid) {
             state
@@ -79,7 +84,12 @@ async fn resolve_project_id_from_query(
         return Ok((Some(pid.to_string()), slug));
     }
 
-    let Some(p) = q.project.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(p) = q
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return Ok((None, None));
     };
 
