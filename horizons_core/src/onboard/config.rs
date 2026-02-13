@@ -9,6 +9,16 @@ pub struct PostgresConfig {
     pub acquire_timeout: Duration,
 }
 
+impl PostgresConfig {
+    /// Returns a SQLx-compatible Postgres URL.
+    ///
+    /// Some providers document `sslrootcert=system` for libpq-compatible clients.
+    /// SQLx interprets `sslrootcert` as a filesystem path, so `system` fails at runtime.
+    pub fn sqlx_url(&self) -> String {
+        normalize_postgres_url_for_sqlx(&self.url)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectDbConfig {
     /// Local directory used for per-project libsql databases.
@@ -48,6 +58,40 @@ pub struct OnboardConfig {
     pub s3: S3Config,
     pub redis: RedisConfig,
     pub helix: HelixConfig,
+}
+
+/// Normalizes Postgres URLs for SQLx runtime compatibility.
+///
+/// Today this strips `sslrootcert=system`, which is valid in some libpq clients
+/// but not understood by SQLx's Postgres connector.
+pub fn normalize_postgres_url_for_sqlx(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+
+    let mut changed = false;
+    let mut keep = Vec::new();
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let strip_sslrootcert_system =
+            key.eq_ignore_ascii_case("sslrootcert") && value.eq_ignore_ascii_case("system");
+        if strip_sslrootcert_system {
+            changed = true;
+            continue;
+        }
+        keep.push(pair);
+    }
+
+    if !changed {
+        return url.to_string();
+    }
+    if keep.is_empty() {
+        return base.to_string();
+    }
+    format!("{base}?{}", keep.join("&"))
 }
 
 impl OnboardConfig {
@@ -170,5 +214,24 @@ impl OnboardConfig {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_postgres_url_for_sqlx;
+
+    #[test]
+    fn strips_sslrootcert_system() {
+        let input = "postgresql://u:p@host:5432/db?sslmode=verify-full&sslrootcert=system";
+        let out = normalize_postgres_url_for_sqlx(input);
+        assert_eq!(out, "postgresql://u:p@host:5432/db?sslmode=verify-full");
+    }
+
+    #[test]
+    fn leaves_other_params_untouched() {
+        let input = "postgresql://u:p@host:5432/db?sslmode=require&application_name=cr";
+        let out = normalize_postgres_url_for_sqlx(input);
+        assert_eq!(out, input);
     }
 }

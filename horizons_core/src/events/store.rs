@@ -17,9 +17,10 @@ pub struct PgEventStore {
 impl PgEventStore {
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn connect(postgres_url: &str) -> Result<Self> {
+        let postgres_url = crate::onboard::config::normalize_postgres_url_for_sqlx(postgres_url);
         let pool = PgPoolOptions::new()
             .max_connections(10)
-            .connect(postgres_url)
+            .connect(&postgres_url)
             .await?;
         Ok(Self { pool })
     }
