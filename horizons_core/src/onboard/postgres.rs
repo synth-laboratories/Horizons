@@ -613,7 +613,11 @@ impl CentralDb for PostgresCentralDb {
         Ok(row.as_ref().map(Self::project_from_row).transpose()?)
     }
 
-    async fn get_project_by_slug(&self, org_id: OrgId, slug: &str) -> Result<Option<ProjectRecord>> {
+    async fn get_project_by_slug(
+        &self,
+        org_id: OrgId,
+        slug: &str,
+    ) -> Result<Option<ProjectRecord>> {
         let row = sqlx::query(
             "SELECT org_id, project_id, slug, created_at FROM projects WHERE org_id = $1 AND slug = $2",
         )

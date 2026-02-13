@@ -23,7 +23,7 @@ pub fn router() -> Router {
 // Auth guard
 // ---------------------------------------------------------------------------
 
-fn admin_guard(headers: &axum::http::HeaderMap) -> Result<(), Response> {
+fn admin_guard(headers: &axum::http::HeaderMap) -> Result<(), Box<Response>> {
     let token = std::env::var("HORIZONS_ADMIN_TOKEN").ok();
     let Some(expected) = token.filter(|t| !t.trim().is_empty()) else {
         return Ok(());
@@ -51,7 +51,9 @@ fn admin_guard(headers: &axum::http::HeaderMap) -> Result<(), Response> {
     }
 
     if got.as_deref() != Some(expected.trim()) {
-        return Err((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        ));
     }
 
     Ok(())
@@ -66,7 +68,7 @@ async fn dashboard(
     headers: axum::http::HeaderMap,
 ) -> Response {
     if let Err(resp) = admin_guard(&headers) {
-        return resp;
+        return *resp;
     }
 
     let version = env!("CARGO_PKG_VERSION").to_string();
@@ -98,7 +100,7 @@ async fn agents(
     headers: axum::http::HeaderMap,
 ) -> Response {
     if let Err(resp) = admin_guard(&headers) {
-        return resp;
+        return *resp;
     }
 
     let mut ids = state.core_agents.list_registered_agent_ids().await;
@@ -113,7 +115,7 @@ async fn agents(
 
 async fn graphs(headers: axum::http::HeaderMap) -> Response {
     if let Err(resp) = admin_guard(&headers) {
-        return resp;
+        return *resp;
     }
 
     let mut items: Vec<String> = horizons_graph::registry::list_builtin_graphs()
@@ -134,7 +136,7 @@ async fn backends(
     headers: axum::http::HeaderMap,
 ) -> Response {
     if let Err(resp) = admin_guard(&headers) {
-        return resp;
+        return *resp;
     }
 
     let db_url = std::env::var("DATABASE_URL")

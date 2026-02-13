@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 pub use crate::onboard::models::{
     ApiKeyRecord, AuditQuery, ConnectorCredential, CoreAgentEventCursor, CoreAgentRecord,
-    ListQuery, OperationRecord, OperationRunRecord, OrgRecord, ProjectRecord, ProjectDbParam,
-    ProjectDbRow, ProjectDbRowExt, ProjectDbValue, ResourceRecord, SyncState, SyncStateKey,
+    ListQuery, OperationRecord, OperationRunRecord, OrgRecord, ProjectDbParam, ProjectDbRow,
+    ProjectDbRowExt, ProjectDbValue, ProjectRecord, ResourceRecord, SyncState, SyncStateKey,
     UserRecord, UserRole, VectorMatch, project_db_migrate,
 };
 

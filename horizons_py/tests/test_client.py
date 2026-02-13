@@ -43,9 +43,11 @@ async def test_publish_event_and_list():
     with respx.mock(base_url="http://localhost:8000") as mock:
         mock.post("/api/v1/events/publish").respond(200, json={"event_id": "evt_1"})
         mock.get("/api/v1/events").respond(200, json=[{
-            "event_id": "evt_1",
+            "id": "evt_1",
             "org_id": str(ORG_ID),
             "project_id": str(PROJECT_ID),
+            "timestamp": "2024-01-01T00:00:00Z",
+            "received_at": "2024-01-01T00:00:00Z",
             "topic": "demo",
             "source": "test",
             "direction": "outbound",
@@ -53,7 +55,8 @@ async def test_publish_event_and_list():
             "dedupe_key": "k",
             "metadata": {},
             "status": "pending",
-            "created_at": "2024-01-01T00:00:00Z"
+            "retry_count": 0,
+            "last_attempt_at": None
         }])
 
         async with HorizonsClient("http://localhost:8000", ORG_ID, project_id=PROJECT_ID) as client:
