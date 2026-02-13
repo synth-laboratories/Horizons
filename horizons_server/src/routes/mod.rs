@@ -21,9 +21,9 @@ pub mod mcp;
 #[cfg(feature = "memory")]
 pub mod memory;
 pub mod onboard;
-pub mod orgs;
 #[cfg(feature = "optimization")]
 pub mod optimization;
+pub mod orgs;
 pub mod pipelines;
 pub mod projects;
 pub mod tick;

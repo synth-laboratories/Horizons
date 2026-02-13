@@ -192,8 +192,8 @@ pub fn verify_signature_from_headers(secret: &str, headers: &HeaderMap, body: &[
 /// Format: `sha256=<hex>`
 #[tracing::instrument(level = "debug", skip(body))]
 pub fn sign_horizons_body(secret: &str, body: &[u8]) -> Result<String> {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| Error::SignatureVerificationFailed)?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| Error::SignatureVerificationFailed)?;
     mac.update(body);
     let bytes = mac.finalize().into_bytes();
     Ok(format!("sha256={}", hex::encode(bytes)))

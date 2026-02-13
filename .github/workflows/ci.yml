@@ -21,7 +21,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          # Keep this aligned with Cargo.lock MSRV constraints.
+          toolchain: 1.91.0
           components: rustfmt, clippy
 
       - name: Rust cache
@@ -39,6 +40,10 @@ jobs:
         run: cargo check --features all
 
       - name: test
+        env:
+          # Keep this aligned with release.yml: Horizons currently links both libsql-ffi and
+          # libsqlite3-sys (via sqlx) which can produce duplicate SQLite symbols on Linux.
+          RUSTFLAGS: "-C link-args=-Wl,--allow-multiple-definition"
         run: cargo test --features all
 
   python:

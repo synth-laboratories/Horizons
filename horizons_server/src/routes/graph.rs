@@ -216,17 +216,20 @@ fn resolve_graph_ir(
     graph_id: Option<&str>,
     graph_ir: Option<GraphIr>,
     graph_yaml: Option<&str>,
-) -> std::result::Result<GraphIr, Response> {
+) -> std::result::Result<GraphIr, Box<Response>> {
     let count = graph_id.is_some() as u8 + graph_ir.is_some() as u8 + graph_yaml.is_some() as u8;
     if count != 1 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(GraphErrorBody {
-                error: "must provide exactly one of graph_id, graph_ir, or graph_yaml".to_string(),
-                diagnostics: None,
-            }),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(GraphErrorBody {
+                    error: "must provide exactly one of graph_id, graph_ir, or graph_yaml"
+                        .to_string(),
+                    diagnostics: None,
+                }),
+            )
+                .into_response(),
+        ));
     }
 
     if let Some(ir) = graph_ir {
@@ -239,27 +242,31 @@ fn resolve_graph_ir(
         let id = graph_id.unwrap_or_default();
         graph_registry::get_builtin_graph_yaml(id)
             .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(GraphErrorBody {
-                        error: format!("unknown built-in graph_id '{id}'"),
-                        diagnostics: None,
-                    }),
+                Box::new(
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(GraphErrorBody {
+                            error: format!("unknown built-in graph_id '{id}'"),
+                            diagnostics: None,
+                        }),
+                    )
+                        .into_response(),
                 )
-                    .into_response()
             })?
             .to_string()
     };
 
     let graph_value: serde_json::Value = serde_yaml::from_str(&yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(GraphErrorBody {
-                error: format!("invalid graph_yaml: {e}"),
-                diagnostics: None,
-            }),
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(GraphErrorBody {
+                    error: format!("invalid graph_yaml: {e}"),
+                    diagnostics: None,
+                }),
+            )
+                .into_response(),
         )
-            .into_response()
     })?;
 
     Ok(GraphIr {
@@ -283,7 +290,8 @@ pub async fn validate(
         req.graph_id.as_deref(),
         req.graph_ir,
         req.graph_yaml.as_deref(),
-    )?;
+    )
+    .map_err(|resp| *resp)?;
     let normalized = normalize_graph_ir(&graph_ir);
     let strictness = req.strictness.unwrap_or(Strictness::Strict);
     let validation = validate_graph_ir(&normalized, strictness);
@@ -304,7 +312,8 @@ pub async fn normalize(
         req.graph_id.as_deref(),
         req.graph_ir,
         req.graph_yaml.as_deref(),
-    )?;
+    )
+    .map_err(|resp| *resp)?;
     let normalized = normalize_graph_ir(&graph_ir);
     let canonical = canonicalize_graph_ir(&normalized);
     Ok(Json(GraphNormalizeResponse {
@@ -323,7 +332,8 @@ pub async fn execute(
         req.graph_id.as_deref(),
         req.graph_ir,
         req.graph_yaml.as_deref(),
-    )?;
+    )
+    .map_err(|resp| *resp)?;
 
     // Include project scoping in graph inputs so context-ingestion pipelines and
     // remote tool executors can reliably key work to the right org/project.

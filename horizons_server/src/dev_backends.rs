@@ -538,7 +538,12 @@ impl CentralDb for DevCentralDb {
         org_id: OrgId,
         project_id: ProjectId,
     ) -> CoreResult<Option<ProjectRecord>> {
-        Ok(self.projects.read().await.get(&(org_id, project_id)).cloned())
+        Ok(self
+            .projects
+            .read()
+            .await
+            .get(&(org_id, project_id))
+            .cloned())
     }
 
     async fn get_project_by_slug(
