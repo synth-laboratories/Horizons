@@ -310,6 +310,10 @@ impl HorizonsClient {
     pub fn pipelines(&self) -> crate::apis::PipelinesApi {
         crate::apis::PipelinesApi::new(self.clone())
     }
+
+    pub fn mcp(&self) -> crate::apis::McpApi {
+        crate::apis::McpApi::new(self.clone())
+    }
 }
 
 #[cfg(test)]

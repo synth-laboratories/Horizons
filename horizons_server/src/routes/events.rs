@@ -1,4 +1,6 @@
+use crate::auth::CentralDbApiKeyAuth;
 use crate::error::ApiError;
+use crate::extract::AuthProvider;
 use crate::extract::OrgIdHeader;
 use crate::server::AppState;
 use axum::Extension;
@@ -210,6 +212,14 @@ pub async fn publish(
 
 #[derive(Debug, Deserialize)]
 pub struct InboundRequest {
+    /// Preferred org identity field for inbound webhooks.
+    ///
+    /// Security note: in production-like modes, the inbound webhook route does not accept an
+    /// unauthenticated `x-org-id` header. Either:
+    /// - send a valid `Authorization: Bearer ...` API key (org derived from auth), or
+    /// - include `org_id` in the signed JSON body and provide `x-horizons-signature`.
+    #[serde(default)]
+    pub org_id: Option<String>,
     pub project_id: Option<String>,
     pub topic: String,
     pub source: String,
@@ -220,17 +230,31 @@ pub struct InboundRequest {
     pub timestamp: Option<DateTime<Utc>>,
 }
 
+fn inbound_allows_unauthenticated_org_header() -> bool {
+    // Keep this narrowly scoped: only the explicitly insecure dev mode may accept org identity
+    // from headers without verified auth or a signed body.
+    std::env::var("HORIZONS_AUTH_MODE")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "dev_insecure" | "devinsecure" | "insecure"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn inbound(
-    OrgIdHeader(org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Optional: enforce inbound webhook signature if configured.
-    if let Ok(secret) = std::env::var("HORIZONS_WEBHOOK_SIGNING_SECRET") {
-        horizons_core::events::webhook::verify_signature_from_headers(&secret, &headers, &body)?;
-    }
+    // Authn option 1: Bearer auth (org derived from API key).
+    // This is intentionally evaluated before signature verification so we can accept either
+    // auth mode without coupling it to global `AuthConfig` behavior.
+    let auth = CentralDbApiKeyAuth::new(state.central_db.clone());
+    let authn = auth.authenticate(&headers).await?;
 
     // Align payload-size guardrail with the events subsystem default (or allow override).
     let max_bytes = std::env::var("HORIZONS_WEBHOOK_MAX_PAYLOAD_BYTES")
@@ -243,8 +267,60 @@ pub async fn inbound(
         ));
     }
 
+    // Authn option 2: Signed webhook body.
+    let signing_secret = std::env::var("HORIZONS_WEBHOOK_SIGNING_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if authn.is_none() {
+        if let Some(secret) = signing_secret.as_deref() {
+            horizons_core::events::webhook::verify_signature_from_headers(secret, &headers, &body)?;
+        } else if !inbound_allows_unauthenticated_org_header() {
+            return Err(ApiError::Core(horizons_core::Error::Unauthorized(
+                "inbound webhook requires either Bearer auth or a configured HORIZONS_WEBHOOK_SIGNING_SECRET".to_string(),
+            )));
+        }
+    }
+
     let req: InboundRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::InvalidInput(format!("invalid json body: {e}")))?;
+
+    let org_id = if let Some((org_id, _identity)) = authn {
+        if let Some(body_org) = req
+            .org_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let body_org = OrgId::from_str(body_org)
+                .map_err(|e| ApiError::InvalidInput(format!("invalid org_id: {e}")))?;
+            if body_org != org_id {
+                return Err(ApiError::Core(horizons_core::Error::Unauthorized(
+                    "org_id does not match authenticated org".to_string(),
+                )));
+            }
+        }
+        org_id
+    } else if let Some(body_org) = req
+        .org_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        OrgId::from_str(body_org)
+            .map_err(|e| ApiError::InvalidInput(format!("invalid org_id: {e}")))?
+    } else if inbound_allows_unauthenticated_org_header() {
+        let raw = headers
+            .get("x-org-id")
+            .ok_or(ApiError::MissingOrgId)?
+            .to_str()
+            .map_err(|e| ApiError::InvalidOrgId(e.to_string()))?;
+        OrgId::from_str(raw).map_err(|e| ApiError::InvalidOrgId(e.to_string()))?
+    } else {
+        return Err(ApiError::Core(horizons_core::Error::Unauthorized(
+            "missing org_id (include org_id in body for signed webhooks)".to_string(),
+        )));
+    };
 
     let project_id_str = req.project_id.clone();
     let event = Event::new(

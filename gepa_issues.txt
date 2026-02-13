@@ -1,0 +1,251 @@
+Horizons Platform Readiness Review (Deep Audit)
+Date: 2026-02-10
+Scope: Horizons server/core/graph/runtime, SDKs (py/ts/rs), CI/CD, deployment, ops hardening
+
+Verdict
+- Horizons is promising but not yet ready for broad external builder adoption.
+- Core functionality exists, but there are platform-blocking gaps in multi-tenant authz, SDK parity, and release/deployment guarantees.
+
+----------------------------------------------------------------------
+P0 (Must Fix Before Broad Builder Adoption)
+----------------------------------------------------------------------
+
+1) Missing org-level authorization checks on handle-scoped engine routes (Critical)
+Why it matters:
+- Potential cross-tenant resource access if a handle ID is known.
+- Breaks tenant isolation, which is a hard requirement for platform trust.
+Evidence:
+- horizons_server/src/routes/engine.rs
+- horizons_core/src/engine/sandbox_runtime.rs
+Needed change:
+- Enforce resource ownership checks (run.org_id must match request org) on all handle-scoped routes:
+  - SSE, send message, release, health, and any future handle route.
+- Return 404 for org mismatches to avoid resource enumeration.
+
+2) Inbound events route can accept externally supplied org_id without strict verification (Critical)
+Why it matters:
+- Event injection risk across org boundaries when auth/signature enforcement is weak or misconfigured.
+Evidence:
+- horizons_server/src/routes/events.rs
+- horizons_server/src/routes/mod.rs
+Needed change:
+- Require one of:
+  - Valid bearer auth mapped to org, or
+  - Valid webhook signature (HMAC) with mandatory secret in production.
+- Remove/disable unauthenticated org header fallback for inbound webhook paths.
+
+3) Release pipeline does not guarantee deployable container images for chart references (Critical)
+Why it matters:
+- Platform release path is incomplete if consumers rely on Helm image tags that are not published by CI.
+Evidence:
+- .github/workflows/release.yml
+- charts/horizons/values.yaml
+Needed change:
+- Add build+push job for ghcr image in release workflow.
+- Tag images with release tags and publish provenance/SBOM where possible.
+
+4) Rust SDK missing MCP API parity (High, not critical)
+Why it matters:
+- Builder capability differs by SDK; platform promise becomes inconsistent by language.
+- MCP appears to be a newer surface area, so this is a parity/readiness gap rather than a core launch blocker.
+Evidence:
+- horizons_rs/src/apis/mod.rs
+- horizons_rs/src/client.rs
+- horizons_py/horizons/mcp.py
+- horizons_ts/src/mcp.ts
+Needed change:
+- Add Rust MCP API module and client accessors matching py/ts surface.
+- Add parity tests to prevent future divergence.
+
+----------------------------------------------------------------------
+P1 (High Priority Pre-Launch)
+----------------------------------------------------------------------
+
+5) Branching and test promotion model mismatch with controller repo (High)
+Why it matters:
+- Integration gates may run against wrong branch fallback, reducing confidence in release promotion.
+Evidence:
+- docs/BRANCHING.md (dev->nightly->main)
+- testing repo conventions (dev->staging->main)
+Needed change:
+- Align branch model with testing controller expectations or explicitly map staging->nightly in CI orchestration.
+
+6) Integration tests are not first-class merge blockers in Horizons repo CI (High)
+Why it matters:
+- Unit-only gates miss distributed/runtime regressions that matter most to external builders.
+Evidence:
+- .github/workflows/ci.yml
+- testing/horizons-tests (external integration suites)
+Needed change:
+- Require integration gate in promotion flow (either in this repo or explicitly in centralized controller with strict enforcement).
+
+7) Insecure dev auth paths can be misconfigured into production behavior (High)
+Why it matters:
+- Any accidental exposure of dev auth bypass undermines production auth assumptions.
+Evidence:
+- horizons_server/src/auth.rs (dev key path)
+- horizons_server/src/extract.rs (insecure header toggles)
+Needed change:
+- Hard-disable dev bypasses in production auth mode.
+- Add startup fail-fast when insecure flags exist in prod mode.
+
+8) API compatibility policy/changelog is missing (High)
+Why it matters:
+- External builders need explicit stability guarantees, deprecation windows, and migration guidance.
+Evidence:
+- No root CHANGELOG.md
+- No API compatibility policy doc
+Needed change:
+- Add:
+  - docs/API_COMPATIBILITY.md
+  - root CHANGELOG.md (keep-a-changelog style)
+  - versioned deprecation policy and support window for v1.
+
+9) Rust SDK onboarding and examples are not platform-ready (High)
+Why it matters:
+- Rust builders face higher activation friction and unclear end-to-end usage.
+Evidence:
+- horizons_rs/README.md minimal coverage
+- no cross-SDK examples directory
+Needed change:
+- Add end-to-end quickstarts in:
+  - examples/quickstart.py
+  - examples/quickstart.ts
+  - examples/quickstart.rs
+- Expand Rust README to parity with py/ts flows.
+
+----------------------------------------------------------------------
+P2 (Important for Reliability and Builder Experience)
+----------------------------------------------------------------------
+
+10) Error model is fragmented across crates and transport layers (Medium)
+Why it matters:
+- Inconsistent error schema increases SDK complexity and weakens DX.
+Evidence:
+- horizons_core/error.rs
+- horizons_server/src/error.rs
+- horizons_graph/src/error.rs
+- rlm error surfaces
+Needed change:
+- Introduce a canonical platform error envelope with:
+  - code (stable machine-readable)
+  - message
+  - details (optional structured object)
+  - trace_id/request_id
+- Standardize HTTP status mapping at API boundary.
+
+11) Connector/graph extensibility is not yet externalized (Medium)
+Why it matters:
+- Platform users need documented extension contracts without modifying core internals.
+Evidence:
+- connector registration in dev state wiring
+- graph registry is largely static/internal
+Needed change:
+- Define and document runtime extension contracts:
+  - connector registration API
+  - graph/plugin registration model
+  - discovery/introspection endpoint for available integrations.
+
+12) Migration strategy is minimal and rollback story is unclear (Medium)
+Why it matters:
+- Upgrade safety is a prerequisite for platform trust and enterprise adoption.
+Evidence:
+- horizons_core/migrations/0001_init.sql
+- charts/horizons/templates/migration-job.yaml
+Needed change:
+- Adopt incremental migration versioning and explicit rollback runbook.
+- Add migration lock/idempotency and preflight checks.
+
+13) No explicit metrics endpoint/SLO framing for operators (Medium)
+Why it matters:
+- Builders and operators need measurable reliability contracts.
+Evidence:
+- health endpoint exists; no clear /metrics exposure
+Needed change:
+- Add Prometheus metrics endpoint and baseline dashboards:
+  - request rate/error/latency by route/org
+  - queue lag/retry metrics
+  - sandbox/runtime resource metrics.
+
+14) TS/Rust timeout/retry ergonomics lag Python SDK (Medium)
+Why it matters:
+- Poor defaults and missing retry controls lead to avoidable client instability.
+Evidence:
+- horizons_ts/src/client.ts
+- horizons_rs/src/client.rs
+- horizons_py/horizons/client.py (timeout support present)
+Needed change:
+- Add configurable timeout and retry policy in TS and Rust clients.
+- Document default retry/backoff semantics across SDKs.
+
+----------------------------------------------------------------------
+P3 (Post-Launch Hardening / Nice-to-Have)
+----------------------------------------------------------------------
+
+15) CORS defaults appear overly broad for production (Low)
+Needed change:
+- Restrict allowed origins via explicit production config.
+
+16) Missing rate limiting and abuse controls (Low)
+Needed change:
+- Add per-org/key limits and backpressure controls.
+
+17) Readiness/liveness depth and dependency health modeling can be improved (Low)
+Needed change:
+- Separate /ready from /health and include dependency checks for readiness only.
+
+----------------------------------------------------------------------
+Recommended Execution Plan
+----------------------------------------------------------------------
+
+Phase 0 (1-2 weeks, launch blockers)
+- Fix authz ownership checks for all handle/resource routes.
+- Lock down inbound webhook org identity and signature validation.
+- Add image publish to release workflow and verify Helm tags consume published artifacts.
+- Implement Rust MCP API parity.
+
+Phase 1 (2-4 weeks, launch quality)
+- Align branch/test promotion model with centralized testing controller.
+- Make integration gates explicit and blocking.
+- Add API compatibility doc, changelog, and deprecation policy.
+- Add multi-SDK quickstart examples and Rust README parity.
+
+Phase 2 (4-8 weeks, operational maturity)
+- Unified platform error envelope.
+- Incremental migration system + rollback runbook.
+- Metrics/SLO baseline and dashboards.
+- SDK timeout/retry parity and contract tests.
+
+----------------------------------------------------------------------
+Definition of "Builder-Ready" Exit Criteria
+----------------------------------------------------------------------
+
+- Multi-tenant authz tests prove no cross-org access paths.
+- Release CI always publishes deployable, versioned container images.
+- SDK parity matrix is green across py/ts/rs for core APIs (including MCP).
+- Compatibility policy and changelog are published and followed.
+- Integration + migration + deployment smoke gates are required before promotion.
+- Operators can observe system health via metrics and documented SLOs.
+
+----------------------------------------------------------------------
+Notes
+----------------------------------------------------------------------
+- This review intentionally focuses on platform readiness for external builders (security, compatibility, reliability, DX), not only feature completeness.
+- Critical and High items should be treated as pre-adoption blockers.
+
+----------------------------------------------------------------------
+Implementation Notes (as of 2026-02-10)
+----------------------------------------------------------------------
+
+P0 items implemented in this workspace:
+- Org-level authz enforcement for handle-scoped engine routes:
+  - horizons_server/src/routes/engine.rs
+- Inbound webhook hardening: require Bearer auth OR (when configured) signature-verified body + explicit org_id;
+  unauthenticated `x-org-id` fallback is now restricted to `HORIZONS_AUTH_MODE=dev_insecure`.
+  - horizons_server/src/routes/events.rs
+- Release workflow now builds and pushes multi-arch GHCR images tagged with both `vX.Y.Z` and `X.Y.Z` plus provenance/SBOM:
+  - .github/workflows/release.yml
+- Rust SDK MCP API parity added (configure, list_tools, call + config/result types):
+  - horizons_rs/src/apis/mcp.rs
+  - horizons_rs/src/apis/mod.rs
+  - horizons_rs/src/client.rs
