@@ -67,7 +67,12 @@ impl VariantSampler for BasicSampler {
                             "Rewrite this prompt to be clearer and more specific, preserving intent. Output only the rewritten prompt.\n\nPROMPT:\n{}",
                             base.template
                         );
-                        let rewritten = llm.complete(&rewrite_prompt).await?;
+                        // Keep sampling robust: if the LLM rewrite fails (timeout, auth, etc),
+                        // fall back to the base prompt rather than failing the whole batch.
+                        let rewritten = match llm.complete(&rewrite_prompt).await {
+                            Ok(s) => s,
+                            Err(_) => base.template.clone(),
+                        };
                         Policy {
                             template: rewritten,
                             metadata: base.metadata.clone(),

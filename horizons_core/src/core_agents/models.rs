@@ -6,6 +6,21 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostLineItem {
+    pub feature_id: String,
+    pub estimated_quantity: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostEstimate {
+    pub line_items: Vec<CostLineItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_estimated_cents: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
     pub id: String,
@@ -154,6 +169,9 @@ pub struct ActionProposal {
     pub action_type: String,
     pub payload: serde_json::Value,
     pub risk_level: RiskLevel,
+    /// Optional cost estimate for billing + spend-cap guardrails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_estimate: Option<CostEstimate>,
     /// Optional idempotency key. If `None`, the proposal is treated as non-idempotent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
@@ -216,6 +234,7 @@ impl ActionProposal {
             action_type,
             payload,
             risk_level,
+            cost_estimate: None,
             dedupe_key,
             context,
             status: ActionStatus::Proposed,
@@ -243,6 +262,11 @@ pub struct AgentContext {
     /// A live handle to the project database so agents can execute SQL directly
     /// without needing to construct or hold their own `Arc<dyn ProjectDb>`.
     pub db: Arc<dyn ProjectDb>,
+    /// EventBus handle for querying/publishing events in agent logic.
+    ///
+    /// This enables "closed-loop" agents (e.g. experiment evaluators) that need
+    /// to consume sensor/action events without wiring an external client.
+    pub event_bus: Arc<dyn crate::events::traits::EventBus>,
     /// Decrypted credentials keyed by connector_id. Populated by the executor
     /// when a `CredentialManager` is configured.
     pub credentials: Option<serde_json::Value>,

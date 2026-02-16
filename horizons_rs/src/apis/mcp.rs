@@ -25,7 +25,16 @@ pub enum McpTransport {
         url: String,
         #[serde(default)]
         headers: HashMap<String, String>,
+        /// HTTP JSON-RPC endpoint path suffix appended to `url`. Defaults to `/call`.
+        ///
+        /// Set to `""` to treat `url` as the full JSON-RPC endpoint.
+        #[serde(default = "default_mcp_http_call_path")]
+        call_path: String,
     },
+}
+
+fn default_mcp_http_call_path() -> String {
+    "/call".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
+use std::time::Duration;
 use tiktoken_rs::{CoreBPE, cl100k_base, get_bpe_from_model};
 
 use crate::error::{GraphError, Result};
@@ -74,8 +75,16 @@ impl Default for LlmClient {
 
 impl LlmClient {
     pub fn new() -> Self {
+        // Prevent indefinite hangs on provider stalls. Override if you really need longer.
+        let timeout_s = std::env::var("HORIZONS_LLM_TIMEOUT_S")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(120);
         LlmClient {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout_s))
+                .build()
+                .expect("failed to build reqwest client"),
         }
     }
 

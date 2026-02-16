@@ -1,6 +1,6 @@
 # Branching And Release Process
 
-This repo uses a 3-branch flow for OSS-quality stability:
+This repo uses a 3-branch flow for open source-quality stability:
 
 - `dev`: day-to-day integration. Most PRs target `dev`.
 - `nightly`: staging/integration branch. Receives batched merges from `dev`.

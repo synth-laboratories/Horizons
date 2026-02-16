@@ -137,6 +137,13 @@ impl DefaultToolExecutor {
             }
             #[cfg(feature = "rlm_v1")]
             "exec_python" => self.exec_python(args, local_state, graph_inputs).await,
+            // `codex_exec` is meant for shell execution via a remote sandbox, but in practice
+            // many agents use it for ad-hoc Python. If the tool executor is not configured,
+            // fall back to the in-process Monty sandbox for python-like snippets.
+            "codex_exec" => {
+                self.codex_exec(args, local_state, graph_inputs, context)
+                    .await
+            }
             // =====================================================================
             // TOOLS THAT GO TO PYTHON BACKEND (via execute_remote):
             // =====================================================================
@@ -151,6 +158,47 @@ impl DefaultToolExecutor {
             // =====================================================================
             _ => self.execute_remote(tool_name, args, context).await,
         }
+    }
+
+    async fn codex_exec(
+        &self,
+        args: &Value,
+        local_state: Option<&SharedLocalToolState>,
+        graph_inputs: Option<&Value>,
+        context: &Value,
+    ) -> Result<Value> {
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let force_sandbox = args
+            .get("force_sandbox")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let timeout_s = args
+            .get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30);
+
+        // If the caller explicitly requests the remote sandbox, preserve the old behavior.
+        if force_sandbox {
+            return self.execute_remote("codex_exec", args, context).await;
+        }
+
+        // Heuristic: if it looks like a python snippet (not a shell command), run it via Monty.
+        #[cfg(feature = "rlm_v1")]
+        {
+            if looks_like_python_snippet(command) {
+                let py_args = json!({
+                    "code": command,
+                    "timeout_ms": (timeout_s.saturating_mul(1000)).min(300_000),
+                });
+                return self.exec_python(&py_args, local_state, graph_inputs).await;
+            }
+        }
+
+        // Otherwise, use the remote tool executor.
+        self.execute_remote("codex_exec", args, context).await
     }
 
     /// Execute tool via Python backend (for complex tools like codex_exec)
@@ -738,6 +786,45 @@ impl DefaultToolExecutor {
             "_rust": true,
         }))
     }
+}
+
+fn looks_like_python_snippet(command: &str) -> bool {
+    let s = command.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // If it looks like an explicit shell invocation, assume it's shell.
+    let lower = s.to_ascii_lowercase();
+    for prefix in [
+        "bash ", "sh ", "zsh ", "python ", "python3 ", "rg ", "grep ", "cat ", "head ", "tail ",
+        "wc ", "ls ", "find ", "sed ", "awk ",
+    ] {
+        if lower.starts_with(prefix) {
+            return false;
+        }
+    }
+    // Multi-line almost always indicates code.
+    if s.contains('\n') {
+        return true;
+    }
+    // Common python statement/function prefixes.
+    for kw in [
+        "import ", "from ", "def ", "class ", "for ", "while ", "with ", "if ", "print(",
+    ] {
+        if lower.starts_with(kw) {
+            return true;
+        }
+    }
+    // Basic assignment like `x = ...`.
+    if s.contains('=')
+        && !s.contains("==")
+        && !s.contains("!=")
+        && !s.contains(">=")
+        && !s.contains("<=")
+    {
+        return true;
+    }
+    false
 }
 
 /// Truncate string with indicator (UTF-8 safe)

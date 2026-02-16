@@ -66,6 +66,7 @@ use uuid::Uuid;
 use crate::server::AppState;
 use horizons_graph::GraphEngine;
 use horizons_graph::llm::LlmClient as GraphLlmClient;
+use horizons_graph::llm::{ApiMode, LlmEndpoint, LlmRequest};
 use horizons_graph::tools::DefaultToolExecutor as GraphToolExecutor;
 
 struct BuiltinGraphRunner {
@@ -186,7 +187,16 @@ fn parse_mcp_transport(v: &serde_json::Value) -> anyhow::Result<McpTransport> {
                             .collect::<HashMap<String, String>>()
                     })
                     .unwrap_or_default();
-                return Ok(McpTransport::Http { url, headers });
+                let call_path = obj
+                    .get("call_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/call")
+                    .to_string();
+                return Ok(McpTransport::Http {
+                    url,
+                    headers,
+                    call_path,
+                });
             }
             other => return Err(anyhow::anyhow!("unknown mcp transport type: {other}")),
         }
@@ -315,6 +325,94 @@ impl voyager::EmbeddingModel for HashEmbedder {
 }
 
 #[cfg(feature = "memory")]
+#[derive(Clone)]
+struct OpenAiEmbedder {
+    client: reqwest::Client,
+    api_base: String,
+    api_key: String,
+    model: String,
+}
+
+#[cfg(feature = "memory")]
+impl OpenAiEmbedder {
+    fn from_env() -> anyhow::Result<Self> {
+        let api_base = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY is required for OpenAiEmbedder"))?;
+        let model = std::env::var("HORIZONS_VOYAGER_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_base: api_base.trim_end_matches('/').to_string(),
+            api_key,
+            model,
+        })
+    }
+
+    fn embeddings_url(&self) -> String {
+        format!("{}/embeddings", self.api_base.trim_end_matches('/'))
+    }
+}
+
+#[cfg(feature = "memory")]
+#[async_trait]
+impl voyager::EmbeddingModel for OpenAiEmbedder {
+    async fn embed(&self, _scope: &voyager::Scope, text: &str) -> voyager::Result<Vec<f32>> {
+        // Minimal OpenAI-compatible embeddings request.
+        let resp = self
+            .client
+            .post(self.embeddings_url())
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({
+                "model": self.model,
+                "input": text,
+            }))
+            .send()
+            .await
+            .map_err(|e| {
+                voyager::VoyagerError::EmbeddingFailed(format!("embeddings request failed: {e}"))
+            })?;
+
+        let status = resp.status();
+        let value = resp.json::<serde_json::Value>().await.map_err(|e| {
+            voyager::VoyagerError::EmbeddingFailed(format!("embeddings response parse failed: {e}"))
+        })?;
+
+        if !status.is_success() {
+            return Err(voyager::VoyagerError::EmbeddingFailed(format!(
+                "embeddings request failed ({status}): {value}"
+            )));
+        }
+
+        let emb = value
+            .get("data")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.get("embedding"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                voyager::VoyagerError::EmbeddingFailed(
+                    "missing embeddings data[0].embedding".to_string(),
+                )
+            })?;
+
+        let mut out = Vec::with_capacity(emb.len());
+        for x in emb {
+            let f = x.as_f64().ok_or_else(|| {
+                voyager::VoyagerError::EmbeddingFailed("non-numeric embedding value".to_string())
+            })?;
+            out.push(f as f32);
+        }
+        Ok(out)
+    }
+
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+}
+
+#[cfg(feature = "memory")]
 #[derive(Debug)]
 struct MockSummarizer;
 
@@ -332,6 +430,139 @@ impl voyager::summarizer::SummarizationModel for MockSummarizer {
     fn name(&self) -> &'static str {
         "mock"
     }
+}
+
+#[cfg(feature = "memory")]
+#[derive(Clone)]
+struct GraphBackedSummarizer {
+    client: GraphLlmClient,
+    model: String,
+    endpoint: LlmEndpoint,
+}
+
+#[cfg(feature = "memory")]
+impl GraphBackedSummarizer {
+    fn from_env() -> anyhow::Result<Self> {
+        let model = std::env::var("HORIZONS_VOYAGER_SUMMARY_MODEL")
+            .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        // Use chat completions by default; can be overridden via GRAPH_LLM_API_MODE.
+        let mut endpoint = horizons_graph::llm::resolve_endpoint(&model, None)
+            .map_err(|e| anyhow::anyhow!("resolve llm endpoint: {e}"))?;
+        if std::env::var("GRAPH_LLM_API_MODE").is_err() {
+            endpoint.mode = ApiMode::ChatCompletions;
+        }
+        Ok(Self {
+            client: GraphLlmClient::new(),
+            model,
+            endpoint,
+        })
+    }
+}
+
+#[cfg(feature = "memory")]
+#[async_trait]
+impl voyager::summarizer::SummarizationModel for GraphBackedSummarizer {
+    async fn summarize(
+        &self,
+        _scope: &voyager::Scope,
+        items: &[voyager::MemoryItem],
+    ) -> voyager::Result<String> {
+        // Keep prompts bounded; the goal is to exercise "real" summarization, not dump everything.
+        let mut lines = Vec::new();
+        for it in items.iter().take(50) {
+            let content = match &it.content {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let short = if content.len() > 400 {
+                &content[..400]
+            } else {
+                &content
+            };
+            lines.push(format!(
+                "- [{}] {} {}",
+                it.item_type.0,
+                it.created_at.to_rfc3339(),
+                short.replace('\n', " ")
+            ));
+        }
+        let prompt = format!(
+            "Summarize the following agent memory items.\n\
+Rules:\n\
+- Output a concise summary.\n\
+- Include key entities, decisions, and recurring themes.\n\
+- If there are action items, list them.\n\n\
+ITEMS:\n{}",
+            lines.join("\n")
+        );
+
+        let req = LlmRequest {
+            model: self.model.clone(),
+            messages: vec![
+                serde_json::json!({"role": "system", "content": "You summarize agent memory."}),
+                serde_json::json!({"role": "user", "content": prompt}),
+            ],
+            temperature: 0.2,
+            max_tokens: Some(300),
+            response_format: None,
+            endpoint: self.endpoint.clone(),
+            stream: false,
+            tools: None,
+            tool_choice: None,
+            previous_response_id: None,
+        };
+
+        let resp = self.client.send(&req, None).await.map_err(|e| {
+            voyager::VoyagerError::SummarizationFailed(format!("llm summarize failed: {e}"))
+        })?;
+        Ok(resp.text)
+    }
+
+    fn name(&self) -> &'static str {
+        "graph-backed"
+    }
+}
+
+#[cfg(feature = "memory")]
+fn build_voyager_embedder_from_env() -> Arc<dyn voyager::EmbeddingModel> {
+    let mode = std::env::var("HORIZONS_VOYAGER_EMBEDDER")
+        .ok()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    if mode == "openai" {
+        match OpenAiEmbedder::from_env() {
+            Ok(e) => return Arc::new(e) as Arc<dyn voyager::EmbeddingModel>,
+            Err(err) => {
+                tracing::warn!("failed to init openai embedder; falling back to hash: {err}")
+            }
+        }
+    }
+
+    let dim = std::env::var("HORIZONS_VECTOR_DIM")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64);
+    Arc::new(HashEmbedder::new(dim)) as Arc<dyn voyager::EmbeddingModel>
+}
+
+#[cfg(feature = "memory")]
+fn build_voyager_summarizer_from_env() -> Arc<dyn voyager::summarizer::SummarizationModel> {
+    let mode = std::env::var("HORIZONS_VOYAGER_SUMMARIZER")
+        .ok()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mode == "llm" || mode == "graph" || mode == "real" {
+        match GraphBackedSummarizer::from_env() {
+            Ok(s) => return Arc::new(s) as Arc<dyn voyager::summarizer::SummarizationModel>,
+            Err(err) => {
+                tracing::warn!("failed to init llm summarizer; falling back to mock: {err}")
+            }
+        }
+    }
+    Arc::new(MockSummarizer) as Arc<dyn voyager::summarizer::SummarizationModel>
 }
 
 #[cfg(feature = "optimization")]
@@ -352,6 +583,307 @@ impl MiproLlmClient for DevMiproLlm {
     fn name(&self) -> &'static str {
         "dev-mock"
     }
+}
+
+#[cfg(feature = "optimization")]
+#[derive(Clone)]
+struct GraphBackedMiproLlm {
+    client: GraphLlmClient,
+    model: String,
+    endpoint: horizons_graph::llm::LlmEndpoint,
+    temperature: f64,
+}
+
+#[cfg(feature = "optimization")]
+impl GraphBackedMiproLlm {
+    fn from_env() -> mipro_v2::Result<Self> {
+        let model =
+            std::env::var("HORIZONS_MIPRO_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        // Rewrites should explore; keep a default > 0 unless explicitly overridden.
+        let temperature = std::env::var("HORIZONS_MIPRO_TEMPERATURE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(0.7);
+        let endpoint = horizons_graph::llm::resolve_endpoint(&model, None)
+            .map_err(|e| mipro_v2::MiproError::Llm(e.to_string()))?;
+        Ok(Self {
+            client: GraphLlmClient::new(),
+            model,
+            endpoint,
+            temperature,
+        })
+    }
+}
+
+#[cfg(feature = "optimization")]
+#[async_trait]
+impl MiproLlmClient for GraphBackedMiproLlm {
+    async fn complete(&self, prompt: &str) -> mipro_v2::Result<String> {
+        let req = horizons_graph::llm::LlmRequest {
+            model: self.model.clone(),
+            messages: vec![serde_json::json!({"role": "user", "content": prompt})],
+            temperature: self.temperature,
+            max_tokens: Some(256),
+            response_format: None,
+            endpoint: self.endpoint.clone(),
+            stream: false,
+            tools: None,
+            tool_choice: None,
+            previous_response_id: None,
+        };
+        let resp = self
+            .client
+            .send(&req, None)
+            .await
+            .map_err(|e| mipro_v2::MiproError::Llm(e.to_string()))?;
+        Ok(resp.text)
+    }
+
+    fn name(&self) -> &'static str {
+        "graph-backed"
+    }
+}
+
+#[cfg(feature = "optimization")]
+fn build_mipro_llm_from_env() -> Arc<dyn MiproLlmClient> {
+    let mode = std::env::var("HORIZONS_MIPRO_LLM")
+        .ok()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    // Default behavior:
+    // - If the user explicitly requests mock, use it.
+    // - If the user explicitly requests real, use it.
+    // - Otherwise, default to the deterministic dev mock (avoids accidental API spend in dev).
+    if mode == "mock" || mode == "dev-mock" {
+        return Arc::new(DevMiproLlm) as Arc<dyn MiproLlmClient>;
+    }
+
+    if mode == "real" || mode == "graph" {
+        match GraphBackedMiproLlm::from_env() {
+            Ok(llm) => return Arc::new(llm) as Arc<dyn MiproLlmClient>,
+            Err(e) => {
+                tracing::warn!("failed to init real mipro llm; falling back to dev mock: {e}")
+            }
+        }
+    }
+
+    Arc::new(DevMiproLlm) as Arc<dyn MiproLlmClient>
+}
+
+#[cfg(feature = "optimization")]
+fn build_mipro_rewrite_llm_from_env() -> Arc<dyn MiproLlmClient> {
+    build_mipro_llm_from_env()
+}
+
+#[cfg(feature = "optimization")]
+#[derive(Debug, serde::Deserialize)]
+struct TaskAppConfigMarker {
+    task_app_url: String,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    env_config: serde_json::Value,
+    #[serde(default)]
+    policy_config: serde_json::Value,
+}
+
+#[cfg(feature = "optimization")]
+fn _extract_taskapp_marker(prompt: &str) -> mipro_v2::Result<(String, TaskAppConfigMarker)> {
+    const MARKER: &str = "HORIZONS_TASKAPP_CONFIG=";
+    let idx = prompt.rfind(MARKER).ok_or_else(|| {
+        mipro_v2::MiproError::InvalidArgument(
+            "missing task app config marker in prompt (expected HORIZONS_TASKAPP_CONFIG=... at end)"
+                .to_string(),
+        )
+    })?;
+    let (before, after) = prompt.split_at(idx);
+    let json_str = after.get(MARKER.len()..).unwrap_or_default().trim();
+
+    let cfg: TaskAppConfigMarker = serde_json::from_str(json_str).map_err(|e| {
+        mipro_v2::MiproError::InvalidArgument(format!("failed to parse task app config JSON: {e}"))
+    })?;
+    Ok((before.trim_end().to_string(), cfg))
+}
+
+#[cfg(feature = "optimization")]
+#[derive(Clone)]
+struct TaskAppMiproLlm {
+    rewrite_llm: Arc<dyn MiproLlmClient>,
+    http: reqwest::Client,
+    environment_api_key: Option<String>,
+    provider_api_key: Option<String>,
+    inference_url: String,
+}
+
+#[cfg(feature = "optimization")]
+impl TaskAppMiproLlm {
+    fn from_env(rewrite_llm: Arc<dyn MiproLlmClient>) -> Self {
+        let environment_api_key = std::env::var("ENVIRONMENT_API_KEY").ok();
+        let provider_api_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("GROQ_API_KEY").ok());
+        let inference_url = std::env::var("HORIZONS_TASKAPP_INFERENCE_URL")
+            .ok()
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+        Self {
+            rewrite_llm,
+            http: reqwest::Client::new(),
+            environment_api_key,
+            provider_api_key,
+            inference_url,
+        }
+    }
+
+    fn _is_rewrite_prompt(prompt: &str) -> bool {
+        // Matches mipro_v2::BasicSampler's rewrite prompt.
+        prompt
+            .trim_start()
+            .starts_with("Rewrite this prompt to be clearer")
+            || prompt.contains("\n\nPROMPT:\n")
+    }
+}
+
+#[cfg(feature = "optimization")]
+#[async_trait]
+impl MiproLlmClient for TaskAppMiproLlm {
+    async fn complete(&self, prompt: &str) -> mipro_v2::Result<String> {
+        if Self::_is_rewrite_prompt(prompt) {
+            return self.rewrite_llm.complete(prompt).await;
+        }
+
+        let (system_prompt, cfg) = _extract_taskapp_marker(prompt)?;
+
+        // Merge configs coming from the marker with provider auth from the Horizons process env.
+        let mut policy_config = match cfg.policy_config {
+            serde_json::Value::Object(map) => serde_json::Value::Object(map),
+            serde_json::Value::Null => serde_json::json!({}),
+            other => {
+                return Err(mipro_v2::MiproError::InvalidArgument(format!(
+                    "policy_config must be an object; got: {other}"
+                )));
+            }
+        };
+        if let serde_json::Value::Object(map) = &mut policy_config {
+            map.insert(
+                "system_prompt".to_string(),
+                serde_json::Value::String(system_prompt),
+            );
+            map.entry("inference_url".to_string())
+                .or_insert_with(|| serde_json::Value::String(self.inference_url.clone()));
+            if let Some(k) = &self.provider_api_key {
+                map.entry("api_key".to_string())
+                    .or_insert_with(|| serde_json::Value::String(k.clone()));
+            }
+        }
+
+        let env_config = match cfg.env_config {
+            serde_json::Value::Object(map) => serde_json::Value::Object(map),
+            serde_json::Value::Null => serde_json::json!({}),
+            other => {
+                return Err(mipro_v2::MiproError::InvalidArgument(format!(
+                    "env_config must be an object; got: {other}"
+                )));
+            }
+        };
+
+        let trace_correlation_id = uuid::Uuid::new_v4().to_string();
+        let req_body = serde_json::json!({
+            "trace_correlation_id": trace_correlation_id,
+            "env": {
+                "seed": cfg.seed.unwrap_or(0) as i64,
+                "config": env_config,
+            },
+            "policy": {
+                "config": policy_config,
+            },
+        });
+
+        let url = format!("{}/rollout", cfg.task_app_url.trim_end_matches('/'));
+        let mut req = self.http.post(url).json(&req_body);
+        if let Some(k) = &self.environment_api_key {
+            req = req.header("x-api-key", k);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| mipro_v2::MiproError::Llm(format!("task app request failed: {e}")))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| {
+            mipro_v2::MiproError::Llm(format!("task app response read failed: {e}"))
+        })?;
+        let val: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            mipro_v2::MiproError::Llm(format!(
+                "task app response JSON decode failed: {e}; status={status}; body_prefix={}",
+                text.chars().take(400).collect::<String>()
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(mipro_v2::MiproError::Llm(format!(
+                "task app returned non-2xx: {status} body={val}"
+            )));
+        }
+
+        let reward = val
+            .get("reward_info")
+            .and_then(|v| v.get("outcome_reward"))
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| {
+                mipro_v2::MiproError::Llm(format!(
+                    "task app response missing reward_info.outcome_reward; body={val}"
+                ))
+            })?;
+        Ok(format!("{reward}"))
+    }
+
+    fn name(&self) -> &'static str {
+        "taskapp-rollout"
+    }
+}
+
+#[cfg(feature = "optimization")]
+#[derive(Debug, Default)]
+struct ParseFloatMetric;
+
+#[cfg(feature = "optimization")]
+#[async_trait]
+impl mipro_v2::EvalMetric for ParseFloatMetric {
+    async fn score(&self, _example: &mipro_v2::Example, output: &str) -> mipro_v2::Result<f32> {
+        let s = output.trim().parse::<f32>().map_err(|e| {
+            mipro_v2::MiproError::InvalidArgument(format!(
+                "expected task app reward output to be a float; got={output:?} err={e}"
+            ))
+        })?;
+        Ok(s)
+    }
+
+    fn name(&self) -> &'static str {
+        "taskapp_reward"
+    }
+}
+
+#[cfg(feature = "optimization")]
+fn build_mipro_llm_and_metric_from_env() -> (Arc<dyn MiproLlmClient>, Arc<dyn mipro_v2::EvalMetric>)
+{
+    let eval_mode = std::env::var("HORIZONS_MIPRO_EVAL")
+        .ok()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    if eval_mode == "taskapp" || eval_mode == "taskapp_reward" || eval_mode == "reward" {
+        let rewrite_llm = build_mipro_rewrite_llm_from_env();
+        let llm = Arc::new(TaskAppMiproLlm::from_env(rewrite_llm)) as Arc<dyn MiproLlmClient>;
+        let metric = Arc::new(ParseFloatMetric) as Arc<dyn mipro_v2::EvalMetric>;
+        return (llm, metric);
+    }
+
+    let llm = build_mipro_rewrite_llm_from_env();
+    let metric = Arc::new(ExactMatchMetric) as Arc<dyn mipro_v2::EvalMetric>;
+    (llm, metric)
 }
 
 struct DevNoopConnector;
@@ -1554,6 +2086,10 @@ impl Cache for DevCache {
 pub struct DevGraphStore {
     nodes: Arc<RwLock<Vec<serde_json::Value>>>,
     edges: Arc<RwLock<Vec<serde_json::Value>>>,
+    // Voyager dev memory uses the HelixGraphStoreAdapter which issues a small set of
+    // cypher queries (CREATE/MATCH MemoryItem). Our dev graph store doesn't implement
+    // cypher, so we special-case those queries to make Voyager work in dev/bench.
+    memory_items: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl DevGraphStore {
@@ -1562,6 +2098,7 @@ impl DevGraphStore {
         Self {
             nodes: Arc::new(RwLock::new(Vec::new())),
             edges: Arc::new(RwLock::new(Vec::new())),
+            memory_items: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -1574,10 +2111,68 @@ impl GraphStore for DevGraphStore {
         _org_id: OrgId,
         _project_id: Option<ProjectId>,
         cypher: &str,
-        _params: serde_json::Value,
+        params: serde_json::Value,
     ) -> CoreResult<Vec<serde_json::Value>> {
-        // Dev backend: return nodes by default, edges if the query looks edge-focused.
+        // Special-case Voyager memory cypher used by HelixGraphStoreAdapter.
+        // This keeps dev mode functional without needing a real cypher engine.
         let cypher_lc = cypher.to_ascii_lowercase();
+        if cypher_lc.contains("memoryitem") {
+            let org_id = params.get("org_id").and_then(|v| v.as_str());
+            let agent_id = params.get("agent_id").and_then(|v| v.as_str());
+            let id = params.get("id").and_then(|v| v.as_str());
+
+            // Append: CREATE (m:MemoryItem {.., item_json: $item_json}) ...
+            if cypher_lc.contains("create (m:memoryitem") {
+                if let (Some(org), Some(agent), Some(mid), Some(item_json)) = (
+                    org_id,
+                    agent_id,
+                    id,
+                    params.get("item_json").and_then(|v| v.as_str()),
+                ) {
+                    let key = format!("{org}/{agent}/{mid}");
+                    self.memory_items
+                        .write()
+                        .await
+                        .insert(key, item_json.to_string());
+                }
+                return Ok(Vec::new());
+            }
+
+            // Get: MATCH (m:MemoryItem {id: $id, org_id: $org_id, agent_id: $agent_id}) ...
+            if cypher_lc.contains("match (m:memoryitem")
+                && cypher_lc.contains("id: $id")
+                && cypher_lc.contains("limit 1")
+            {
+                if let (Some(org), Some(agent), Some(mid)) = (org_id, agent_id, id) {
+                    let key = format!("{org}/{agent}/{mid}");
+                    if let Some(item_json) = self.memory_items.read().await.get(&key) {
+                        return Ok(vec![serde_json::json!({ "item_json": item_json })]);
+                    }
+                    return Ok(Vec::new());
+                }
+            }
+
+            // List: MATCH (m:MemoryItem {org_id: $org_id, agent_id: $agent_id}) ...
+            if cypher_lc.contains("match (m:memoryitem")
+                && cypher_lc.contains("org_id: $org_id")
+                && cypher_lc.contains("agent_id: $agent_id")
+                && !cypher_lc.contains("id: $id")
+            {
+                if let (Some(org), Some(agent)) = (org_id, agent_id) {
+                    let prefix = format!("{org}/{agent}/");
+                    let items = self.memory_items.read().await;
+                    let mut out = Vec::new();
+                    for (k, v) in items.iter() {
+                        if k.starts_with(&prefix) {
+                            out.push(serde_json::json!({ "item_json": v }));
+                        }
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+
+        // Dev backend: return nodes by default, edges if the query looks edge-focused.
         if cypher_lc.contains("edge") || cypher_lc.contains("[r]") || cypher_lc.contains("rel") {
             return Ok(self.edges.read().await.clone());
         }
@@ -2028,9 +2623,8 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
 
     #[cfg(feature = "memory")]
     let memory: Arc<dyn HorizonsMemory> = {
-        let embedder = Arc::new(HashEmbedder::new(64)) as Arc<dyn voyager::EmbeddingModel>;
-        let summarizer =
-            Arc::new(MockSummarizer) as Arc<dyn voyager::summarizer::SummarizationModel>;
+        let embedder = build_voyager_embedder_from_env();
+        let summarizer = build_voyager_summarizer_from_env();
         let mut cfg = voyager::config::VoyagerConfig::default();
         cfg.retrieval.relevance_weight = 1.0;
         cfg.retrieval.recency_weight = 0.0;
@@ -2048,9 +2642,8 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
 
     #[cfg(feature = "optimization")]
     let optimization: Arc<OptimizationEngine> = {
-        let llm = Arc::new(DevMiproLlm) as Arc<dyn MiproLlmClient>;
+        let (llm, metric) = build_mipro_llm_and_metric_from_env();
         let sampler = Arc::new(mipro_v2::BasicSampler::new()) as Arc<dyn MiproVariantSampler>;
-        let metric = Arc::new(ExactMatchMetric) as Arc<dyn mipro_v2::EvalMetric>;
         let cl_impl = Arc::new(build_mipro_continual_learning(llm, sampler, metric));
         let cl = cl_impl.clone() as Arc<dyn horizons_core::optimization::traits::ContinualLearning>;
         Arc::new(OptimizationEngine::new(
@@ -2090,9 +2683,8 @@ pub async fn build_dev_state(data_dir: impl AsRef<Path>) -> anyhow::Result<AppSt
     > = {
         // Rebuild the same underlying optimizer/evaluator wiring used above so the cycle endpoint
         // can access the concrete MIPRO optimizer (for prompt rendering + LLM access).
-        let llm = Arc::new(DevMiproLlm) as Arc<dyn MiproLlmClient>;
+        let (llm, metric) = build_mipro_llm_and_metric_from_env();
         let sampler = Arc::new(mipro_v2::BasicSampler::new()) as Arc<dyn MiproVariantSampler>;
-        let metric = Arc::new(ExactMatchMetric) as Arc<dyn mipro_v2::EvalMetric>;
         let cl_impl = Arc::new(build_mipro_continual_learning(llm, sampler, metric));
 
         let cfg = VerifierConfig {

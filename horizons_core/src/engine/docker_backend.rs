@@ -18,7 +18,7 @@ const DEFAULT_IMAGE: &str = "ubuntu:24.04";
 const SANDBOX_AGENT_PORT: u16 = 2468;
 
 /// Maximum time to wait for sandbox-agent to become healthy after provisioning.
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Interval between health check polls.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);

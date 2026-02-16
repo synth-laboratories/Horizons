@@ -1,0 +1,98 @@
+Online GEPA Readiness Review
+Date: 2026-02-10
+Scope: Compare offline MIPRO, online MIPRO, and offline GEPA to define what is needed for production-grade online GEPA.
+
+----------------------------------------------------------------------
+1) Current State Review
+----------------------------------------------------------------------
+
+Offline MIPRO (implemented, mature)
+- Rust path executes full optimization loop via `run_mipro_job(..., mode=offline)`.
+- Durable state flow exists (SQLite + blob sync, branch/run lifecycle, command processing).
+- Supports cancel/pause/resume semantics in execution engine.
+- Produces attempted/optimized candidates and completion payloads.
+- Python and Rust paths both support this flow and capture job artifacts/events.
+
+Online MIPRO (implemented, productized)
+- Explicit mode resolution + validation exists (`resolve_mipro_mode`, `validate_mipro_online_config`).
+- System initialization is first-class (`init_system`) and persisted in job metadata.
+- Dedicated public API surface exists for interactive control:
+  - sessions: create/get/pause/resume/cancel/reward/prompt
+  - systems: url/status/candidates/state/events/events/stream
+- Python API already proxies these MIPRO online endpoints.
+
+Offline GEPA (implemented, feature-rich)
+- GEPA mode resolution exists and offline execution path is robust.
+- Full offline run pipeline exists (config build, stage context, mutation/reflection/proposer wiring, rollouts, event emission).
+- Integrates with interceptor/trial registration and task app auth wiring.
+- Supports substantial validation and guardrails in Python route + service layers.
+
+Online GEPA (implemented, interactive)
+- GEPA online session APIs exist with parity with online MIPRO sessions:
+  - sessions: create/get/pause/resume/cancel/reward/prompt
+  - systems: url/status/candidates/state/events/events/stream
+- A GEPA proxy exists (`/api/gepa/v1/{system_id}/chat/completions`) that:
+  - selects a candidate for each rollout
+  - injects the candidate instruction into the request (system message)
+  - returns `x-gepa-rollout-id` and `x-gepa-candidate-id` headers for reward attribution
+- Python backend proxies online GEPA endpoints to Rust so clients can use a stable surface.
+- SDK/client surface exists (`GepaOnlineSession`) + runnable Banking77 demo script.
+
+----------------------------------------------------------------------
+2) What Online GEPA Still Needs
+----------------------------------------------------------------------
+
+P0: Reliability and durability (still missing)
+1. Persist online GEPA system/session state durably across restarts.
+   - Today the authoritative online GEPA state lives in-memory in `rust_backend` (HashMap).
+   - We persist snapshots into the prompt-learning job metadata, but do not yet reconstruct state on restart.
+   - Need replay/recovery to support production restarts and multi-instance deployment.
+
+P0: Lifecycle semantics (partial)
+2. Make online GEPA lifecycle semantics restart-safe.
+   - Pause/resume/cancel endpoints exist, but the transitions are not durable across process restarts yet.
+   - Define and enforce terminal-state rules (`completed` vs `cancelled` vs `failed`).
+
+P1: Billing/metering
+3. Add online GEPA billing/metering policy aligned with platform expectations.
+
+P1: Eventing and UX
+4. Standardize GEPA online event schema and client expectations (SSE stream semantics, keepalives, event types).
+
+P2: Validation and testing
+5. Add config validation depth for online GEPA (parity with MIPRO online where appropriate).
+6. Add integration + e2e tests for:
+   - session create/control + proxy calls + reward attribution
+   - SSE/event correctness
+   - restart recovery
+   - auth/token handling (SynthTunnel + env key paths)
+
+----------------------------------------------------------------------
+3) Suggested Delivery Plan
+----------------------------------------------------------------------
+
+Phase 1 (API and lifecycle)
+- Add GEPA online session endpoints in Rust.
+- Add Python proxy routes for GEPA online systems/sessions.
+- Align job status model for online GEPA (no immediate success on init).
+
+Phase 2 (runtime + durability)
+- Implement/verify durable online GEPA state + restart recovery.
+- Add pause/resume/cancel command handling.
+- Finalize online GEPA rollout/update loop semantics.
+
+Phase 3 (platform quality)
+- Add billing/metering hooks.
+- Add SDK parity methods.
+- Add integration/e2e tests and harden event schema.
+
+----------------------------------------------------------------------
+4) Definition of Done for Online GEPA
+----------------------------------------------------------------------
+
+- Users can create and control online GEPA through stable public APIs (not internal-only system bootstrap).
+- Online GEPA jobs remain in coherent runtime states and do not complete immediately after init.
+- Candidate/reward updates and best snapshot semantics are deterministic and queryable.
+- Restart/recovery behavior is validated.
+- Auth (API key + worker token + task app key) works across full online flow.
+- SDKs expose equivalent online GEPA capabilities with tested parity.

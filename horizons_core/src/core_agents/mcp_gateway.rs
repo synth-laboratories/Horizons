@@ -38,7 +38,27 @@ pub enum McpTransport {
         url: String,
         #[serde(default)]
         headers: HashMap<String, String>,
+        /// HTTP JSON-RPC endpoint path suffix appended to `url`.
+        /// Defaults to `/call` for backward compatibility.
+        ///
+        /// Set to `""` to treat `url` as the full JSON-RPC endpoint (e.g. `http://host:4011/mcp`).
+        #[serde(default = "default_mcp_http_call_path")]
+        call_path: String,
     },
+}
+
+fn default_mcp_http_call_path() -> String {
+    "/call".to_string()
+}
+
+fn mcp_http_endpoint(url: &str, call_path: &str) -> String {
+    let base = url.trim_end_matches('/');
+    let suffix = call_path.trim();
+    if suffix.is_empty() {
+        return base.to_string();
+    }
+    let suffix = suffix.trim_start_matches('/');
+    format!("{}/{}", base, suffix)
 }
 
 struct StdioServer {
@@ -145,7 +165,7 @@ enum McpServerHandle {
         server: Box<Mutex<StdioServer>>,
     },
     Http {
-        url: String,
+        endpoint: String,
         headers: HashMap<String, String>,
         client: HttpClient,
     },
@@ -167,7 +187,7 @@ impl McpServerHandle {
                     .await?
             }
             Self::Http {
-                url,
+                endpoint,
                 headers,
                 client,
                 ..
@@ -178,7 +198,7 @@ impl McpServerHandle {
                     "method": "tools/list",
                     "params": {},
                 });
-                let mut r = client.post(format!("{}/call", url.trim_end_matches('/')));
+                let mut r = client.post(endpoint);
                 for (k, v) in headers {
                     r = r.header(k, v);
                 }
@@ -232,7 +252,7 @@ impl McpServerHandle {
                 s.jsonrpc_call(request_id, "tools/call", params).await
             }
             Self::Http {
-                url,
+                endpoint,
                 headers,
                 client,
                 ..
@@ -243,7 +263,7 @@ impl McpServerHandle {
                     "method": "tools/call",
                     "params": params,
                 });
-                let mut r = client.post(format!("{}/call", url.trim_end_matches('/')));
+                let mut r = client.post(endpoint);
                 for (k, v) in headers {
                     r = r.header(k, v);
                 }
@@ -281,11 +301,24 @@ impl McpGateway {
         tool_name: &str,
         server_names: &[String],
     ) -> Result<(String, String)> {
-        if let Some((server, tool)) = tool_name.split_once('.') {
-            if server.trim().is_empty() || tool.trim().is_empty() {
-                return Err(Error::InvalidInput("invalid tool name".to_string()));
+        if let Some((prefix, rest)) = tool_name.split_once('.') {
+            // Only treat the prefix as an MCP server name if it actually matches a configured server.
+            // This avoids breaking tool names that are themselves namespaced (e.g. `vending.read_email`).
+            if server_names.iter().any(|s| s == prefix) {
+                if prefix.trim().is_empty() || rest.trim().is_empty() {
+                    return Err(Error::InvalidInput("invalid tool name".to_string()));
+                }
+                return Ok((prefix.to_string(), rest.to_string()));
             }
-            return Ok((server.to_string(), tool.to_string()));
+
+            // If there's only one configured MCP server, route dotted tool names to it verbatim.
+            if server_names.len() == 1 {
+                return Ok((server_names[0].clone(), tool_name.to_string()));
+            }
+
+            return Err(Error::InvalidInput(format!(
+                "unknown mcp server prefix '{prefix}' (use '<server>.<tool>' when multiple MCP servers are configured)"
+            )));
         }
 
         if server_names.len() == 1 {
@@ -319,12 +352,16 @@ impl McpGateway {
                         server: Box::new(Mutex::new(server)),
                     }
                 }
-                McpTransport::Http { url, headers } => {
+                McpTransport::Http {
+                    url,
+                    headers,
+                    call_path,
+                } => {
                     if url.trim().is_empty() {
                         return Err(Error::InvalidInput("mcp http url is empty".to_string()));
                     }
                     McpServerHandle::Http {
-                        url: url.clone(),
+                        endpoint: mcp_http_endpoint(url, call_path),
                         headers: headers.clone(),
                         client: HttpClient::new(),
                     }
