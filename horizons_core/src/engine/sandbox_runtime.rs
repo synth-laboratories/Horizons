@@ -177,23 +177,44 @@ impl SandboxRuntime {
         client.post_message(&session_id, instruction).await?;
 
         // 7. Wait for completion via SSE events or timeout.
+        //
+        // IMPORTANT: We must drain `events_rx` concurrently while waiting for
+        // completion. The SSE reader sends events through this channel AND
+        // signals completion via `completion_tx`. If the channel fills up
+        // (capacity=256) before the reader reaches `turn.completed`, the reader
+        // blocks on `events_tx.send().await` and never signals completion —
+        // causing a deadlock. Draining here prevents that.
         let timeout = Duration::from_secs(config.timeout_seconds);
         let mut output_buf: Option<String> = None;
         let mut all_events = Vec::new();
+        let sleep = tokio::time::sleep(timeout);
+        tokio::pin!(sleep);
+        tokio::pin!(completion_rx);
 
-        let (completed, error_msg) = tokio::select! {
-            result = completion_rx => {
-                match result {
-                    Ok(true) => (true, None),
-                    Ok(false) => (false, Some("session ended with error".to_string())),
-                    Err(_) => (false, Some("SSE reader dropped completion channel".to_string())),
+        let mut completed = false;
+        let mut error_msg: Option<String> = None;
+
+        loop {
+            tokio::select! {
+                result = &mut completion_rx => {
+                    match result {
+                        Ok(true) => { completed = true; }
+                        Ok(false) => { error_msg = Some("session ended with error".to_string()); }
+                        Err(_) => { error_msg = Some("SSE reader dropped completion channel".to_string()); }
+                    }
+                    break;
+                }
+                Some(event) = events_rx.recv() => {
+                    Self::extract_output_from_universal(&event, &mut output_buf);
+                    all_events.push(event);
+                }
+                _ = &mut sleep => {
+                    tracing::warn!("session timed out");
+                    error_msg = Some("session timed out".to_string());
+                    break;
                 }
             }
-            _ = tokio::time::sleep(timeout) => {
-                tracing::warn!("session timed out");
-                (false, Some("session timed out".to_string()))
-            }
-        };
+        }
 
         // Drain any remaining events from the channel.
         while let Ok(event) = events_rx.try_recv() {
