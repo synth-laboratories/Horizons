@@ -87,6 +87,11 @@ pub struct SandboxConfig {
     /// Working directory inside the container where task files reside.
     pub workdir: Option<String>,
 
+    /// Mount the host Docker socket into the container so the agent can run
+    /// Docker commands (build, compose, etc.) via the host daemon.
+    #[serde(default)]
+    pub docker_socket: bool,
+
     /// Optional restart policy for long-running sandboxes started via `start_agent_tracked`.
     /// One-shot runs (`run_agent`) do not use this.
     #[serde(default)]
@@ -111,6 +116,7 @@ impl Default for SandboxConfig {
             env_vars: HashMap::new(),
             timeout_seconds: 1800,
             workdir: None,
+            docker_socket: false,
             restart_policy: None,
         }
     }

@@ -124,6 +124,7 @@ impl SandboxedAgent {
             env_vars,
             timeout_seconds: self.timeout_seconds,
             workdir: self.workdir.clone(),
+            docker_socket: false,
             restart_policy: None,
         }
     }

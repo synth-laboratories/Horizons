@@ -75,11 +75,26 @@ impl DockerBackend {
         let agent = config.agent.as_sandbox_agent_str();
         let no_token_flag = "--no-token";
 
+        let docker_cli_install = if config.docker_socket {
+            r#"
+# Install Docker CLI (socket is mounted from host).
+curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+  | tar xz --strip-components=1 -C /usr/local/bin docker/docker 2>/dev/null || true
+# Install Docker Compose plugin.
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose 2>/dev/null && \
+  chmod +x /usr/local/lib/docker/cli-plugins/docker-compose || true
+"#
+        } else {
+            ""
+        };
+
         format!(
             r#"
 set -e
 apt-get update -qq && apt-get install -y -qq curl ca-certificates git > /dev/null 2>&1
-
+{docker_cli_install}
 # Install sandbox-agent if it's not already present.
 # Note: we force `--platform linux/amd64` on Apple Silicon, so `uname -m` inside
 # the container should match the published binary arch (typically x86_64).
@@ -156,6 +171,12 @@ impl SandboxBackend for DockerBackend {
         if let Some(ref bin_path) = self.sandbox_agent_bin {
             args.push("-v".to_string());
             args.push(format!("{bin_path}:/usr/local/bin/sandbox-agent:ro"));
+        }
+
+        // Mount host Docker socket so the agent can run docker/compose commands.
+        if config.docker_socket {
+            args.push("-v".to_string());
+            args.push("/var/run/docker.sock:/var/run/docker.sock".to_string());
         }
 
         // sandbox-agent currently publishes Linux x86_64 binaries only. On Apple Silicon,

@@ -196,6 +196,7 @@ async fn run_engine(
         env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
+        docker_socket: false,
         restart_policy: None,
     };
 
@@ -246,6 +247,7 @@ async fn start_engine(
         env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
+        docker_socket: false,
         restart_policy: None,
     };
 

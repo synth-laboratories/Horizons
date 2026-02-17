@@ -155,6 +155,7 @@ impl OrchestratorAgentRuntime {
             env_vars,
             timeout_seconds: self.config.timeout_seconds,
             workdir: Some("/workspace".to_string()),
+            docker_socket: false,
             restart_policy: None,
         };
 
