@@ -19,9 +19,8 @@ const DEFAULT_IMAGE: &str = "ubuntu:24.04";
 const SANDBOX_AGENT_PORT: u16 = 2468;
 
 /// Maximum time to wait for sandbox-agent to become healthy after provisioning.
-/// Increased to 300s to accommodate custom setup scripts (repo cloning, etc.)
-/// that run before the sandbox-agent server starts.
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
+/// 600s to accommodate QEMU emulation + repo cloning + Docker CLI install.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Interval between health check polls.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -51,28 +50,6 @@ impl DockerBackend {
             network,
             sandbox_agent_bin: bin,
         }
-    }
-
-    /// Detect the Docker socket path on the host.
-    ///
-    /// Checks (in order): `DOCKER_HOST` env var, Colima default socket,
-    /// then falls back to `/var/run/docker.sock`.
-    fn docker_socket_path() -> String {
-        // DOCKER_HOST=unix:///path/to/docker.sock
-        if let Ok(host) = std::env::var("DOCKER_HOST") {
-            if let Some(path) = host.strip_prefix("unix://") {
-                if !path.is_empty() {
-                    return path.to_string();
-                }
-            }
-        }
-        // Colima default location
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-        let colima = format!("{home}/.colima/default/docker.sock");
-        if std::path::Path::new(&colima).exists() {
-            return colima;
-        }
-        "/var/run/docker.sock".to_string()
     }
 
     /// Find a random free port on the host for port mapping.
@@ -197,9 +174,8 @@ impl SandboxBackend for DockerBackend {
 
         // Mount host Docker socket so the agent can run docker/compose commands.
         if config.docker_socket {
-            let host_sock = Self::docker_socket_path();
             args.push("-v".to_string());
-            args.push(format!("{host_sock}:/var/run/docker.sock"));
+            args.push("/var/run/docker.sock:/var/run/docker.sock".to_string());
         }
 
         // sandbox-agent currently publishes Linux x86_64 binaries only. On Apple Silicon,
