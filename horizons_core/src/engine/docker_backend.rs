@@ -1,8 +1,9 @@
 //! Docker sandbox backend — provisions local Docker containers with sandbox-agent.
 //!
 //! This backend shells out to the `docker` CLI to manage container lifecycle.
-//! It creates a container from the configured image, installs sandbox-agent
-//! inside it, and exposes the sandbox-agent HTTP server on a random host port.
+//! It creates a container from the configured image, volume-mounts the custom
+//! sandbox-agent binary, installs the coding agent, and exposes the sandbox-agent
+//! HTTP server on a random host port.
 
 use crate::engine::models::{SandboxBackendKind, SandboxConfig, SandboxHandle};
 use crate::engine::traits::SandboxBackend;
@@ -18,42 +19,42 @@ const DEFAULT_IMAGE: &str = "ubuntu:24.04";
 const SANDBOX_AGENT_PORT: u16 = 2468;
 
 /// Maximum time to wait for sandbox-agent to become healthy after provisioning.
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
+/// Increased to 300s to accommodate custom setup scripts (repo cloning, etc.)
+/// that run before the sandbox-agent server starts.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Interval between health check polls.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Sandbox-agent install script run inside the container.
-///
-/// Notes:
-/// - On Apple Silicon, we run the container as `linux/amd64` because upstream only
-///   publishes an x86_64 Linux binary today.
-/// - `install.sh` installs to `/usr/local/bin/sandbox-agent` by default.
-const INSTALL_SCRIPT: &str = r#"
-set -e
-apt-get update -qq && apt-get install -y -qq curl ca-certificates jq > /dev/null 2>&1
-curl -fsSL https://releases.rivet.dev/sandbox-agent/latest/install.sh | sh
-"#;
-
 /// Docker-based sandbox backend.
 ///
-/// Provisions containers using `docker run`, installs sandbox-agent via curl,
-/// and starts the sandbox-agent server. Cleanup happens via `docker rm -f`.
+/// Provisions containers using `docker run`, volume-mounts a custom-built
+/// sandbox-agent binary with REST API support, and starts the server.
+/// Cleanup happens via `docker rm -f`.
 #[derive(Debug, Clone)]
 pub struct DockerBackend {
     /// Optional Docker network to attach containers to.
     pub network: Option<String>,
+    /// Optional path to the sandbox-agent binary on the host.
+    /// If provided, it is volume-mounted into the container; otherwise
+    /// sandbox-agent is downloaded inside the container via the setup script.
+    pub sandbox_agent_bin: Option<String>,
 }
 
 impl DockerBackend {
     pub fn new(network: Option<String>) -> Self {
-        Self { network }
+        let bin = std::env::var("SANDBOX_AGENT_BIN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Self {
+            network,
+            sandbox_agent_bin: bin,
+        }
     }
 
     /// Find a random free port on the host for port mapping.
     fn random_host_port() -> u16 {
-        // Use a high-range ephemeral port. In production this would use a
-        // proper port allocator; for dev/local use, random in 30000-60000 suffices.
         use rand::Rng;
         let mut rng = rand::thread_rng();
         rng.gen_range(30000..60000)
@@ -69,21 +70,56 @@ impl DockerBackend {
         flags
     }
 
-    /// Build the setup script that installs sandbox-agent and starts it.
+    /// Build the setup script that installs the agent and starts sandbox-agent.
     fn setup_script(config: &SandboxConfig) -> String {
         let agent = config.agent.as_sandbox_agent_str();
         let no_token_flag = "--no-token";
 
-        // Install sandbox-agent, install the agent, then start the server.
         format!(
             r#"
-{INSTALL_SCRIPT}
-sandbox-agent install-agent {agent} 2>&1 || true
-if [ "{agent}" = "codex" ] && [ -n "${{OPENAI_API_KEY:-}}" ] && [ -x "/root/.local/share/sandbox-agent/bin/codex" ]; then
-  # Codex CLI expects credentials to be "logged in" (stored on disk) rather than only reading env.
-  # Best-effort: seed it from OPENAI_API_KEY so sandbox sessions work out of the box.
-  printf '%s' "$OPENAI_API_KEY" | /root/.local/share/sandbox-agent/bin/codex login --with-api-key > /dev/null 2>&1 || true
+set -e
+apt-get update -qq && apt-get install -y -qq curl ca-certificates git > /dev/null 2>&1
+
+# Install sandbox-agent if it's not already present.
+# Note: we force `--platform linux/amd64` on Apple Silicon, so `uname -m` inside
+# the container should match the published binary arch (typically x86_64).
+if ! command -v sandbox-agent >/dev/null 2>&1; then
+  curl -fsSL "https://github.com/rivet-dev/sandbox-agent/releases/latest/download/sandbox-agent-$(uname -m)-unknown-linux-gnu" \
+    -o /usr/local/bin/sandbox-agent
+  chmod +x /usr/local/bin/sandbox-agent
 fi
+
+sandbox-agent install-agent {agent} 2>&1 || true
+if [ "{agent}" = "codex" ] && [ -n "${{OPENAI_API_KEY:-}}" ]; then
+  if [ -x "/root/.local/share/sandbox-agent/bin/codex" ]; then
+    printf '%s' "$OPENAI_API_KEY" | /root/.local/share/sandbox-agent/bin/codex login --with-api-key > /dev/null 2>&1 || true
+  fi
+  # Fallback: write auth.json directly in case codex login failed silently (e.g. under QEMU)
+  mkdir -p /root/.codex
+  printf '{{"OPENAI_API_KEY": "%s"}}' "$OPENAI_API_KEY" > /root/.codex/auth.json
+fi
+
+# Configure git identity for commits.
+git config --global user.email "horizons-bot@synth.dev"
+git config --global user.name "Horizons Bot"
+
+# Set up GitHub CLI auth if GITHUB_TOKEN is available.
+if [ -n "${{GITHUB_TOKEN:-}}" ]; then
+  (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null) || true
+  echo "deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list 2>/dev/null || true
+  apt-get update -qq && apt-get install -y -qq gh > /dev/null 2>&1 || true
+  echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
+fi
+
+# Run custom setup script if provided (clone repos, install deps, etc.)
+if [ -n "${{SANDBOX_SETUP_SCRIPT:-}}" ]; then
+  echo ">>> Running custom setup script..."
+  eval "$SANDBOX_SETUP_SCRIPT" 2>&1 || echo ">>> WARNING: setup script failed (continuing anyway)"
+  echo ">>> Custom setup complete."
+fi
+
 sandbox-agent server {no_token_flag} --host 0.0.0.0 --port {SANDBOX_AGENT_PORT} &
 # Wait for the server to be listening
 for i in $(seq 1 30); do
@@ -116,11 +152,15 @@ impl SandboxBackend for DockerBackend {
             format!("{host_port}:{SANDBOX_AGENT_PORT}"),
         ];
 
+        // Optionally volume-mount a custom sandbox-agent binary.
+        if let Some(ref bin_path) = self.sandbox_agent_bin {
+            args.push("-v".to_string());
+            args.push(format!("{bin_path}:/usr/local/bin/sandbox-agent:ro"));
+        }
+
         // sandbox-agent currently publishes Linux x86_64 binaries only. On Apple Silicon,
         // default Docker images are `linux/arm64` which cannot execute those binaries.
-        // Force an amd64 container so the installer works under QEMU emulation.
-        //
-        // Override with HORIZONS_DOCKER_PLATFORM if you need something different.
+        // Force an amd64 container so the binary works under QEMU emulation.
         let platform = std::env::var("HORIZONS_DOCKER_PLATFORM")
             .ok()
             .map(|s| s.trim().to_string())

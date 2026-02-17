@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
 
 fn inherit_env_if_missing(env_vars: &mut HashMap<String, String>, key: &str) {
     if env_vars.contains_key(key) {
@@ -250,7 +249,7 @@ async fn start_engine(
         restart_policy: None,
     };
 
-    let run = runtime
+    let (run, _channels) = runtime
         .start_agent_tracked(_org_id.to_string(), None, &config, &req.instruction)
         .await?;
 
@@ -269,7 +268,7 @@ async fn events_sse(
     OrgIdHeader(org_id): OrgIdHeader,
     Extension(state): Extension<Arc<AppState>>,
     Path(handle_id): Path<String>,
-    Query(q): Query<EventsQuery>,
+    Query(_q): Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>> + Send>, ApiError> {
     let runtime = state
         .sandbox_runtime
@@ -280,46 +279,59 @@ async fn events_sse(
     let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
+    // Proxy the REST SSE event stream to the HTTP client.
+    let session_id = run.session_id.clone();
     tokio::spawn(async move {
-        let mut offset: u64 = q.offset.unwrap_or(0);
+        let resp = match client.events_sse_connect(&session_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx
+                    .send(
+                        SseEvent::default()
+                            .event("error")
+                            .data(format!("SSE connect error: {e}")),
+                    )
+                    .await;
+                return;
+            }
+        };
 
-        loop {
-            match client.fetch_events(&run.session_id, offset).await {
-                Ok(resp) => {
-                    for event in &resp.events {
-                        if let Some(seq) = event.get("sequence").and_then(|v| v.as_u64()) {
-                            if seq > offset {
-                                offset = seq;
-                            }
-                        }
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
 
-                        let data = serde_json::to_string(event).unwrap_or_default();
-                        let sse = SseEvent::default().event("event").data(data);
-                        if tx.send(sse).await.is_err() {
-                            return; // Client disconnected.
-                        }
-
-                        // Check for session ended.
-                        if event.get("type").and_then(|t| t.as_str()) == Some("session.ended") {
-                            let _ = tx.send(SseEvent::default().event("done")).await;
-                            return;
-                        }
-                    }
-                }
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
                 Err(e) => {
                     let _ = tx
                         .send(
                             SseEvent::default()
                                 .event("error")
-                                .data(format!("event poll error: {e}")),
+                                .data(format!("SSE stream error: {e}")),
                         )
                         .await;
                     return;
                 }
-            }
+            };
 
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buf.find("\n\n") {
+                let frame = buf[..pos].to_string();
+                buf = buf[pos + 2..].to_string();
+
+                for line in frame.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let sse = SseEvent::default().event("event").data(data.to_string());
+                        if tx.send(sse).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
         }
+
+        let _ = tx.send(SseEvent::default().event("done")).await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok);
@@ -349,8 +361,9 @@ async fn send_message(
         ));
     }
 
+    // Send follow-up message via REST API (fire-and-forget).
     let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
-    client.send_message(&run.session_id, msg).await?;
+    client.post_message(&run.session_id, msg).await?;
 
     Ok(Json(serde_json::json!({
         "ok": true,

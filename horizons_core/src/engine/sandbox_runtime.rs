@@ -1,20 +1,28 @@
 //! Sandbox runtime orchestrator.
 //!
 //! Coordinates the full lifecycle of running a coding agent in a sandbox:
-//! provision container → create session → send message → poll events →
-//! handle permissions → detect completion → collect results → release.
+//! provision container → create session → SSE event stream →
+//! post message → collect results → release.
 
 use crate::engine::models::{PermissionMode, SandboxConfig, SandboxHandle, SandboxResult};
-use crate::engine::sandbox_agent_client::{CreateSessionRequest, SandboxAgentClient};
+use crate::engine::sandbox_agent_client::SandboxAgentClient;
 use crate::engine::traits::SandboxBackend;
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use futures_util::StreamExt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-/// Interval between event polling iterations.
-const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Channels returned by `start_agent()` for monitoring a fire-and-forget session.
+///
+/// The caller receives the SSE event stream and a one-shot completion signal.
+pub struct StartAgentChannels {
+    pub events_rx: tokio::sync::mpsc::Receiver<serde_json::Value>,
+    pub completion_rx: tokio::sync::oneshot::Receiver<bool>,
+    pub sse_task: tokio::task::JoinHandle<()>,
+}
 
 /// Snapshot of a long-running sandbox agent run started via `start_agent_tracked`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -25,15 +33,19 @@ pub struct ActiveSandboxRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     pub sandbox: SandboxHandle,
+    /// The session ID used for REST API calls.
     pub session_id: String,
     pub restart_count: u32,
     pub started_at: DateTime<Utc>,
     pub config: SandboxConfig,
     pub instruction: String,
+    /// Epoch millis of the last SSE event received (0 = no events yet).
+    #[serde(skip)]
+    pub last_sse_epoch_ms: Arc<AtomicI64>,
 }
 
 /// The sandbox runtime orchestrates provisioning a container, driving a coding
-/// agent session via sandbox-agent, and collecting the results.
+/// agent session via sandbox-agent's REST API, and collecting the results.
 ///
 /// It holds a reference to the sandbox backend (Docker or Daytona) and provides
 /// the `run_agent()` method which encapsulates the entire execution flow.
@@ -50,15 +62,20 @@ impl SandboxRuntime {
         }
     }
 
+    /// Access the underlying sandbox backend (for manual orchestration).
+    pub fn backend(&self) -> &Arc<dyn SandboxBackend> {
+        &self.backend
+    }
+
     /// Run a coding agent session in a new sandbox, returning structured results.
     ///
     /// This is the primary entry point for executing agents. It handles:
     /// 1. Provisioning the container via the configured backend
     /// 2. Waiting for sandbox-agent to become healthy
-    /// 3. Creating a session for the requested agent
-    /// 4. Sending the instruction message
-    /// 5. Polling for events and auto-approving permissions (in bypass mode)
-    /// 6. Detecting session completion
+    /// 3. Creating a session via the REST API
+    /// 4. Starting SSE event reader for permission handling
+    /// 5. Sending the prompt message
+    /// 6. Waiting for completion via SSE events
     /// 7. Collecting results and releasing the container
     #[tracing::instrument(level = "info", skip(self, config, instruction), fields(agent = %config.agent))]
     pub async fn run_agent(
@@ -96,8 +113,12 @@ impl SandboxRuntime {
         }
     }
 
-    /// Internal: run the agent session inside an already-provisioned sandbox.
-    async fn run_session_in_sandbox(
+    /// Run the agent session inside an already-provisioned sandbox
+    /// using the sandbox-agent REST API.
+    ///
+    /// Public so that callers (e.g. `OrchestratorAgentRuntime`) can split
+    /// provision → run → release when they need to observe the handle mid-run.
+    pub async fn run_session_in_sandbox(
         &self,
         handle: &SandboxHandle,
         config: &SandboxConfig,
@@ -107,133 +128,227 @@ impl SandboxRuntime {
         self.backend.wait_ready(handle).await?;
         tracing::info!("sandbox-agent is ready");
 
-        // 3. Create the sandbox-agent client and session.
+        // 3. Create the sandbox-agent client.
         let client = SandboxAgentClient::new(&handle.sandbox_agent_url, None);
         let session_id = uuid::Uuid::new_v4().to_string();
+        let agent_str = config.agent.as_sandbox_agent_str();
 
-        let create_req = CreateSessionRequest {
-            agent: config.agent.as_sandbox_agent_str().to_string(),
-            agent_mode: Some("build".to_string()),
-            permission_mode: Some(config.permission_mode.as_str().to_string()),
-            model: config.model.clone(),
+        // 4. Create REST session.
+        let model_ref = config.model.as_deref();
+        let perm_mode = match config.permission_mode {
+            PermissionMode::Bypass => Some("bypass"),
+            _ => None,
         };
-
-        let create_resp = client.create_session(&session_id, &create_req).await?;
+        let create_resp = client
+            .create_session(&session_id, agent_str, model_ref, perm_mode)
+            .await?;
         if !create_resp.healthy {
+            let err_detail = create_resp
+                .error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
             return Err(Error::BackendMessage(format!(
-                "sandbox-agent session not healthy: {:?}",
-                create_resp.error
+                "create_session returned unhealthy: {err_detail}"
             )));
         }
-        tracing::info!(%session_id, "agent session created");
+        tracing::info!(%session_id, "REST session created");
 
-        // 4. Send the instruction message.
-        client.send_message(&session_id, instruction).await?;
-        tracing::info!("instruction sent");
+        // 5. Start SSE event reader with completion channel.
+        let bypass_perms = config.permission_mode == PermissionMode::Bypass;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(256);
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<bool>();
+        let client_sse = client.clone();
+        let sid_sse = session_id.clone();
+        let sse_task = tokio::spawn(async move {
+            Self::sse_reader(
+                client_sse,
+                &sid_sse,
+                bypass_perms,
+                events_tx,
+                Some(completion_tx),
+                true,
+                None,
+            )
+            .await;
+        });
 
-        // 5. Poll for events until the session ends or timeout.
-        let mut all_events: Vec<serde_json::Value> = Vec::new();
-        let mut offset: u64 = 0;
-        let mut session_ended = false;
-        let mut final_output: Option<String> = None;
-        let mut error_msg: Option<String> = None;
-        let mut turn_ended = false;
+        // 6. Send message (fire-and-forget).
+        tracing::info!("sending message via REST, waiting for completion");
+        client.post_message(&session_id, instruction).await?;
 
-        let timeout_deadline =
-            tokio::time::Instant::now() + Duration::from_secs(config.timeout_seconds);
+        // 7. Wait for completion via SSE events or timeout.
+        let timeout = Duration::from_secs(config.timeout_seconds);
+        let mut output_buf: Option<String> = None;
+        let mut all_events = Vec::new();
 
-        loop {
-            if tokio::time::Instant::now() > timeout_deadline {
-                tracing::warn!("session timed out, terminating");
-                let _ = client.terminate_session(&session_id).await;
-                error_msg = Some("session timed out".to_string());
-                break;
-            }
-
-            let events_resp = client.fetch_events(&session_id, offset).await?;
-
-            for event_json in &events_resp.events {
-                // Track the maximum sequence number for offset.
-                if let Some(seq) = event_json.get("sequence").and_then(|v| v.as_u64()) {
-                    if seq > offset {
-                        offset = seq;
-                    }
+        let (completed, error_msg) = tokio::select! {
+            result = completion_rx => {
+                match result {
+                    Ok(true) => (true, None),
+                    Ok(false) => (false, Some("session ended with error".to_string())),
+                    Err(_) => (false, Some("SSE reader dropped completion channel".to_string())),
                 }
+            }
+            _ = tokio::time::sleep(timeout) => {
+                tracing::warn!("session timed out");
+                (false, Some("session timed out".to_string()))
+            }
+        };
 
-                // Parse the event type to detect session end and permission requests.
-                let event_type = event_json
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+        // Drain any remaining events from the channel.
+        while let Ok(event) = events_rx.try_recv() {
+            Self::extract_output_from_universal(&event, &mut output_buf);
+            all_events.push(event);
+        }
 
-                match event_type {
-                    "session.ended" => {
-                        session_ended = true;
+        // 8. Abort SSE reader and terminate session.
+        sse_task.abort();
+        let _ = client.terminate_session(&session_id).await;
 
-                        // Extract end reason.
-                        if let Some(data) = event_json.get("data") {
-                            if let Some(reason) = data.get("reason").and_then(|r| r.as_str()) {
-                                if reason == "error" {
-                                    error_msg = data
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .map(|s| s.to_string());
-                                }
+        Ok(SandboxResult {
+            events: all_events,
+            completed,
+            duration_seconds: 0.0, // Caller fills this in.
+            final_output: output_buf,
+            error: error_msg,
+        })
+    }
+
+    /// Background task: reads SSE events from the universal events stream.
+    ///
+    /// Handles permission auto-approval in bypass mode and signals completion
+    /// when `session.ended` is observed or (if `complete_on_turn` is true)
+    /// when `turn.completed` is observed.
+    ///
+    /// For blocking sessions, set `complete_on_turn = true` (completes after first turn).
+    /// For fire-and-forget workers, set `complete_on_turn = false` (only completes on
+    /// `session.ended` or SSE stream close).
+    pub async fn sse_reader(
+        client: SandboxAgentClient,
+        session_id: &str,
+        bypass_permissions: bool,
+        events_tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+        completion_tx: Option<tokio::sync::oneshot::Sender<bool>>,
+        complete_on_turn: bool,
+        last_sse_epoch_ms: Option<Arc<AtomicI64>>,
+    ) {
+        let resp = match client.events_sse_connect(session_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(%e, "SSE connect failed, permissions may not be handled");
+                if let Some(tx) = completion_tx {
+                    let _ = tx.send(false);
+                }
+                return;
+            }
+        };
+
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        let mut completion_tx = completion_tx;
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!(%e, "SSE stream error");
+                    break;
+                }
+            };
+
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            // Process complete SSE frames (delimited by blank lines).
+            while let Some(pos) = buf.find("\n\n") {
+                let frame = buf[..pos].to_string();
+                buf = buf[pos + 2..].to_string();
+
+                for line in frame.lines() {
+                    let data = match line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"))
+                    {
+                        Some(d) => d.trim(),
+                        None => continue,
+                    };
+
+                    let event: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::debug!(%e, sse_data = %data, "SSE data not parseable as JSON");
+                            continue;
+                        }
+                    };
+
+                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    tracing::debug!(%event_type, "SSE event received");
+
+                    // Update last-active timestamp.
+                    if let Some(ref ts) = last_sse_epoch_ms {
+                        ts.store(Utc::now().timestamp_millis(), Ordering::Relaxed);
+                    }
+
+                    // Auto-approve permission requests in bypass mode.
+                    if bypass_permissions && event_type == "permission.requested" {
+                        if let Some(perm_id) = event
+                            .get("data")
+                            .and_then(|d| d.get("permission_id"))
+                            .and_then(|p| p.as_str())
+                        {
+                            tracing::info!(%perm_id, "auto-approving permission (bypass)");
+                            if let Err(e) =
+                                client.permission_reply(session_id, perm_id, "always").await
+                            {
+                                tracing::warn!(%e, %perm_id, "permission_reply failed");
                             }
                         }
                     }
-                    "turn.ended" => {
-                        // Many agent adapters keep sessions open for multi-turn usage and only
-                        // emit `turn.ended`. For one-shot runs (engine/run), treat end-of-turn as
-                        // completion and terminate the session ourselves.
-                        turn_ended = true;
 
-                        if let Some(data) = event_json.get("data") {
-                            // Best-effort: capture adapter error message if present.
-                            if let Some(meta) = data.get("metadata") {
-                                if let Some(status) = meta.get("status").and_then(|v| v.as_str()) {
-                                    if status == "failed" {
-                                        error_msg = meta
-                                            .get("error")
-                                            .and_then(|e| e.get("message"))
-                                            .and_then(|m| m.as_str())
-                                            .map(|s| s.to_string())
-                                            .or(error_msg);
-                                    }
-                                }
+                    // Detect session completion via top-level event type.
+                    if event_type == "session.ended" {
+                        tracing::info!(%event_type, "session.ended event received");
+                        if let Some(tx) = completion_tx.take() {
+                            let _ = tx.send(true);
+                        }
+                    }
+
+                    // Detect turn.completed — only signal completion if complete_on_turn is set.
+                    if event_type == "turn.completed" {
+                        tracing::info!(%event_type, %complete_on_turn, "turn.completed event received");
+                        if complete_on_turn {
+                            if let Some(tx) = completion_tx.take() {
+                                let _ = tx.send(true);
                             }
                         }
                     }
-                    "permission.requested" => {
-                        // Auto-approve permissions in bypass mode.
-                        if config.permission_mode == PermissionMode::Bypass {
-                            if let Some(data) = event_json.get("data") {
-                                if let Some(pid) =
-                                    data.get("permission_id").and_then(|v| v.as_str())
-                                {
-                                    tracing::debug!(%pid, "auto-approving permission");
-                                    let _ =
-                                        client.reply_permission(&session_id, pid, "always").await;
-                                }
-                            }
-                        }
-                    }
-                    "item.completed" => {
-                        // Try to extract final text output from the last completed assistant item.
-                        if let Some(data) = event_json.get("data") {
-                            if let Some(item) = data.get("item") {
-                                if item.get("role").and_then(|r| r.as_str()) != Some("assistant") {
-                                    // Ignore user echoes (some adapters emit user items only).
-                                } else if let Some(content) =
+
+                    // Detect turn.completed embedded as status label in item.completed.
+                    if event_type == "item.completed" {
+                        if let Some(item) = event.get("data").and_then(|d| d.get("item")) {
+                            let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                            if kind == "status" {
+                                if let Some(content) =
                                     item.get("content").and_then(|c| c.as_array())
                                 {
-                                    for part in content {
-                                        if part.get("type").and_then(|t| t.as_str()) == Some("text")
-                                        {
-                                            if let Some(text) =
-                                                part.get("text").and_then(|t| t.as_str())
-                                            {
-                                                final_output = Some(text.to_string());
+                                    for c in content {
+                                        let label =
+                                            c.get("label").and_then(|l| l.as_str()).unwrap_or("");
+                                        if label == "turn.completed" {
+                                            let detail_str = c
+                                                .get("detail")
+                                                .and_then(|d| d.as_str())
+                                                .unwrap_or("");
+                                            let failed =
+                                                detail_str.contains("\"status\":\"failed\"");
+                                            if failed {
+                                                tracing::warn!(detail = %detail_str, "turn.completed with failure");
+                                            } else {
+                                                tracing::info!(%complete_on_turn, "turn.completed status detected");
+                                            }
+                                            if complete_on_turn {
+                                                if let Some(tx) = completion_tx.take() {
+                                                    let _ = tx.send(!failed);
+                                                }
                                             }
                                         }
                                     }
@@ -241,71 +356,144 @@ impl SandboxRuntime {
                             }
                         }
                     }
-                    _ => {}
+
+                    // Detect errors.
+                    if event_type == "error" {
+                        let msg = event
+                            .get("data")
+                            .and_then(|d| d.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown error");
+                        tracing::warn!(%msg, "error event received");
+                        if let Some(tx) = completion_tx.take() {
+                            let _ = tx.send(false);
+                        }
+                    }
+
+                    // Forward to collector (ignore send errors — receiver may be
+                    // dropped in fire-and-forget mode, but we must keep running
+                    // for permission auto-approval).
+                    let _ = events_tx.send(event).await;
                 }
-
-                all_events.push(event_json.clone());
             }
-
-            if session_ended || turn_ended {
-                if turn_ended && !session_ended {
-                    let _ = client.terminate_session(&session_id).await;
-                }
-                tracing::info!("session ended, collected {} events", all_events.len());
-                break;
-            }
-
-            tokio::time::sleep(EVENT_POLL_INTERVAL).await;
         }
 
-        Ok(SandboxResult {
-            events: all_events,
-            completed: (session_ended || turn_ended) && error_msg.is_none(),
-            duration_seconds: 0.0, // Caller fills this in.
-            final_output,
-            error: error_msg,
-        })
+        // Stream ended without explicit session.ended.
+        if let Some(tx) = completion_tx {
+            let _ = tx.send(false);
+        }
     }
 
-    /// Run an agent without waiting for completion — returns the handle and client
-    /// for external event polling. Useful for SSE streaming.
+    /// Try to extract text output from universal events.
+    ///
+    /// Looks for assistant message items with text content.
+    fn extract_output_from_universal(event: &serde_json::Value, output_buf: &mut Option<String>) {
+        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if event_type == "item.delta" {
+            // Item deltas contain streaming text chunks.
+            if let Some(delta) = event
+                .get("data")
+                .and_then(|d| d.get("delta"))
+                .and_then(|t| t.as_str())
+            {
+                output_buf.get_or_insert_with(String::new).push_str(delta);
+            }
+        } else if event_type == "item.completed" {
+            // Completed items may have final text content.
+            if let Some(item) = event.get("data").and_then(|d| d.get("item")) {
+                let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                if role == "assistant" && kind == "message" {
+                    if let Some(content) = item.get("content").and_then(|c| c.as_str()) {
+                        *output_buf = Some(content.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run an agent without waiting for completion — returns the handle,
+    /// session ID, last-active timestamp, and monitoring channels.
+    ///
+    /// Returns `(handle, session_id, last_sse_epoch_ms, channels)`.
     #[tracing::instrument(level = "info", skip(self, config, instruction), fields(agent = %config.agent))]
     pub async fn start_agent(
         &self,
         config: &SandboxConfig,
         instruction: &str,
-    ) -> Result<(SandboxHandle, String)> {
+    ) -> Result<(SandboxHandle, String, Arc<AtomicI64>, StartAgentChannels)> {
         let handle = self.backend.provision(config).await?;
         self.backend.wait_ready(&handle).await?;
 
         let client = SandboxAgentClient::new(&handle.sandbox_agent_url, None);
         let session_id = uuid::Uuid::new_v4().to_string();
+        let agent_str = config.agent.as_sandbox_agent_str();
 
-        let create_req = CreateSessionRequest {
-            agent: config.agent.as_sandbox_agent_str().to_string(),
-            agent_mode: Some("build".to_string()),
-            permission_mode: Some(config.permission_mode.as_str().to_string()),
-            model: config.model.clone(),
+        // Create REST session.
+        let model_ref = config.model.as_deref();
+        let perm_mode = match config.permission_mode {
+            PermissionMode::Bypass => Some("bypass"),
+            _ => None,
         };
-
-        let create_resp = client.create_session(&session_id, &create_req).await?;
+        let create_resp = client
+            .create_session(&session_id, agent_str, model_ref, perm_mode)
+            .await?;
         if !create_resp.healthy {
-            let _ = self.backend.release(&handle).await;
+            let err_detail = create_resp
+                .error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
             return Err(Error::BackendMessage(format!(
-                "sandbox-agent session not healthy: {:?}",
-                create_resp.error
+                "create_session returned unhealthy: {err_detail}"
             )));
         }
+        tracing::info!(%session_id, "REST session created (fire-and-forget mode)");
 
-        client.send_message(&session_id, instruction).await?;
+        // Start SSE reader with completion channel.
+        let bypass_perms = config.permission_mode == PermissionMode::Bypass;
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(256);
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<bool>();
+        let last_sse_epoch_ms = Arc::new(AtomicI64::new(0));
+        let last_sse_clone = last_sse_epoch_ms.clone();
+        let client_sse = client.clone();
+        let sid_sse = session_id.clone();
+        let sse_task = tokio::spawn(async move {
+            Self::sse_reader(
+                client_sse,
+                &sid_sse,
+                bypass_perms,
+                events_tx,
+                Some(completion_tx),
+                true,
+                Some(last_sse_clone),
+            )
+            .await;
+        });
 
-        Ok((handle, session_id))
+        // Send message in background (fire-and-forget).
+        let client_msg = client.clone();
+        let sid_msg = session_id.clone();
+        let instr = instruction.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = client_msg.post_message(&sid_msg, &instr).await {
+                tracing::warn!(%e, "background post_message failed");
+            }
+        });
+
+        let channels = StartAgentChannels {
+            events_rx,
+            completion_rx,
+            sse_task,
+        };
+
+        Ok((handle, session_id, last_sse_epoch_ms, channels))
     }
 
     /// Start an agent session and track it in-memory for monitoring/restart.
     ///
     /// Returns a stable `run_id` which can be used for subsequent health checks,
-    /// SSE polling, release, and crash recovery.
+    /// SSE polling, release, and crash recovery, plus channels for monitoring.
     #[tracing::instrument(level = "info", skip(self, config, instruction), fields(agent = %config.agent))]
     pub async fn start_agent_tracked(
         &self,
@@ -313,8 +501,9 @@ impl SandboxRuntime {
         agent_id: Option<String>,
         config: &SandboxConfig,
         instruction: &str,
-    ) -> Result<ActiveSandboxRun> {
-        let (handle, session_id) = self.start_agent(config, instruction).await?;
+    ) -> Result<(ActiveSandboxRun, StartAgentChannels)> {
+        let (handle, session_id, last_sse_epoch_ms, channels) =
+            self.start_agent(config, instruction).await?;
         let run_id = ulid::Ulid::new().to_string();
         let run = ActiveSandboxRun {
             run_id: run_id.clone(),
@@ -326,9 +515,10 @@ impl SandboxRuntime {
             started_at: Utc::now(),
             config: config.clone(),
             instruction: instruction.to_string(),
+            last_sse_epoch_ms,
         };
         self.active.insert(run_id, run.clone());
-        Ok(run)
+        Ok((run, channels))
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -341,6 +531,18 @@ impl SandboxRuntime {
         self.active.get(run_id).map(|e| e.value().clone())
     }
 
+    /// Return the last SSE activity time for a tracked run, if any event has been received.
+    pub fn get_sse_activity(&self, run_id: &str) -> Option<DateTime<Utc>> {
+        self.active.get(run_id).and_then(|r| {
+            let ms = r.last_sse_epoch_ms.load(Ordering::Relaxed);
+            if ms > 0 {
+                DateTime::from_timestamp_millis(ms)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Release a tracked run (best-effort) and remove it from the active set.
     #[tracing::instrument(level = "info", skip_all)]
     pub async fn release_run(&self, run_id: &str) -> Result<()> {
@@ -349,30 +551,37 @@ impl SandboxRuntime {
             .remove(run_id)
             .map(|(_, v)| v)
             .ok_or_else(|| Error::NotFound(format!("sandbox run not found: {run_id}")))?;
+        // Terminate session before releasing the container.
+        let client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
+        let _ = client.terminate_session(&run.session_id).await;
         self.backend.release(&run.sandbox).await
     }
 
     /// Restart a tracked run by provisioning a new sandbox and replaying the original instruction.
-    ///
-    /// This does not attempt checkpoint/resume; it is a best-effort "restart from scratch" policy
-    /// intended for dev ergonomics and crash cleanup.
     #[tracing::instrument(level = "info", skip_all)]
-    pub async fn restart_run(&self, run_id: &str) -> Result<ActiveSandboxRun> {
+    pub async fn restart_run(
+        &self,
+        run_id: &str,
+    ) -> Result<(ActiveSandboxRun, StartAgentChannels)> {
         let Some(mut run) = self.get_active(run_id) else {
             return Err(Error::NotFound(format!("sandbox run not found: {run_id}")));
         };
 
-        let (new_handle, new_session_id) = self.start_agent(&run.config, &run.instruction).await?;
+        let (new_handle, new_session_id, new_last_sse, channels) =
+            self.start_agent(&run.config, &run.instruction).await?;
 
         // Release the old sandbox best-effort.
+        let old_client = SandboxAgentClient::new(&run.sandbox.sandbox_agent_url, None);
+        let _ = old_client.terminate_session(&run.session_id).await;
         let _ = self.backend.release(&run.sandbox).await;
 
         run.sandbox = new_handle;
         run.session_id = new_session_id;
         run.restart_count = run.restart_count.saturating_add(1);
         run.started_at = Utc::now();
+        run.last_sse_epoch_ms = new_last_sse;
         self.active.insert(run_id.to_string(), run.clone());
-        Ok(run)
+        Ok((run, channels))
     }
 
     /// Release a sandbox by its handle.
