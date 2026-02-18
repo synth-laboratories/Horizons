@@ -107,6 +107,12 @@ impl McpToolServer {
         }
     }
 
+    /// Remove all registered tools. Call before re-registering for a new run
+    /// to avoid stale handlers from previous runs being matched first.
+    pub async fn clear_tools(&self) {
+        self.tools.write().await.clear();
+    }
+
     /// Register a tool with a typed async handler.
     ///
     /// The handler closure receives the `arguments` JSON object from the
