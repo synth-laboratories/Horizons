@@ -9,4 +9,5 @@ pub mod secrets;
 pub mod sqlite;
 pub mod sqlite_project_db;
 pub mod traits;
+#[cfg(feature = "turso")]
 pub mod turso;

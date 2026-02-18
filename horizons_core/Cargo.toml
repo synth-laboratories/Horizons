@@ -17,7 +17,7 @@ hmac = "0.12"
 aws-config = { version = "1.8.12", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
 aws-credential-types = "1.2.11"
 aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
-libsql = { version = "0.5.0", features = ["serde"] }
+libsql = { version = "0.5.0", features = ["serde"], optional = true }
 redis = { version = "0.27.6", features = ["aio", "tokio-comp", "connection-manager"] }
 # `bytes_stream()` is gated behind reqwest's `stream` feature.
 reqwest = { version = "0.11.27", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -47,6 +47,7 @@ rlm = { package = "rlm-rs", path = "../rlm", optional = true }
 
 [features]
 default = []
+turso = ["dep:libsql", "sqlx/sqlite"]
 memory = ["dep:voyager"]
 optimization = ["dep:mipro_v2"]
 evaluation = ["dep:rlm"]
