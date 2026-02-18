@@ -110,6 +110,11 @@ impl OrchestratorAgentRuntime {
         self.config.env_vars.contains_key(key)
     }
 
+    /// Append an extra setup script line that runs inside the sandbox before the agent starts.
+    pub fn add_setup_line(&mut self, line: impl Into<String>) {
+        self.config.extra_setup_lines.push(line.into());
+    }
+
     /// Returns the current status (idle or running with metadata).
     pub async fn status(&self) -> OrchestratorStatus {
         let guard = self.running.lock().await;
