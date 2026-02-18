@@ -128,6 +128,9 @@ async fn run_engine(
         env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
+        docker_socket: false,
+        restart_policy: None,
+        log_tags: std::collections::HashMap::new(),
     };
 
     let (result, handle) = runtime.run_agent(&config, &req.instruction).await?;
@@ -176,6 +179,9 @@ async fn start_engine(
         env_vars,
         timeout_seconds: req.timeout_seconds,
         workdir: None,
+        docker_socket: false,
+        restart_policy: None,
+        log_tags: std::collections::HashMap::new(),
     };
 
     let (handle, session_id, _last_sse, _channels) = runtime.start_agent(&config, &req.instruction).await?;

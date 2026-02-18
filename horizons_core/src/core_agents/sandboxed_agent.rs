@@ -126,6 +126,7 @@ impl SandboxedAgent {
             workdir: self.workdir.clone(),
             docker_socket: false,
             restart_policy: None,
+            log_tags: HashMap::new(),
         }
     }
 }

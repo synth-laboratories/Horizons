@@ -12,3 +12,4 @@ pub mod orchestrator_agent_runtime;
 pub mod sandbox_agent_client;
 pub mod sandbox_runtime;
 pub mod traits;
+pub mod victoria_logs;

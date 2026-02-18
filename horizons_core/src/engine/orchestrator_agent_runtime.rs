@@ -4,8 +4,11 @@
 //! the agent completes. Enforces singleton semantics: if a run is already
 //! in progress, `run()` returns `None` immediately.
 
+use crate::engine::docker_backend::capture_container_logs;
 use crate::engine::mcp_tool_server::McpToolServer;
-use crate::engine::models::{AgentKind, PermissionMode, SandboxConfig, SandboxResult};
+use crate::engine::models::{
+    AgentKind, PermissionMode, SandboxBackendKind, SandboxConfig, SandboxResult,
+};
 use crate::engine::sandbox_runtime::SandboxRuntime;
 use crate::Result;
 use std::collections::HashMap;
@@ -94,6 +97,19 @@ impl OrchestratorAgentRuntime {
         }
     }
 
+    /// Insert or overwrite a single env var that will be injected into sandbox containers.
+    ///
+    /// Use this to inject per-run secrets (e.g. per-org `SYNTH_API_KEY` retrieved from the
+    /// control plane) after the runtime has been constructed but before calling `run()`.
+    pub fn set_env_var(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.config.env_vars.insert(key.into(), value.into());
+    }
+
+    /// Returns true if the given env var key is already present in the sandbox env map.
+    pub fn has_env_var(&self, key: &str) -> bool {
+        self.config.env_vars.contains_key(key)
+    }
+
     /// Returns the current status (idle or running with metadata).
     pub async fn status(&self) -> OrchestratorStatus {
         let guard = self.running.lock().await;
@@ -117,6 +133,20 @@ impl OrchestratorAgentRuntime {
         &self,
         instruction: &str,
         trigger: serde_json::Value,
+    ) -> Option<Result<(SandboxResult, crate::engine::models::SandboxHandle)>> {
+        self.run_with_tags(instruction, trigger, HashMap::new()).await
+    }
+
+    /// Run the orchestrator agent with structured log tags that will be attached
+    /// to sandbox universal events when teeing to sinks (e.g. VictoriaLogs).
+    ///
+    /// This is the preferred entry point for embedding runtimes (SMR, SB, etc.)
+    /// that need correlation fields like `run_id`, `project_id`, etc.
+    pub async fn run_with_tags(
+        &self,
+        instruction: &str,
+        trigger: serde_json::Value,
+        log_tags: HashMap<String, String>,
     ) -> Option<Result<(SandboxResult, crate::engine::models::SandboxHandle)>> {
         let run_id = ulid::Ulid::new().to_string();
 
@@ -157,6 +187,7 @@ impl OrchestratorAgentRuntime {
             workdir: Some("/workspace".to_string()),
             docker_socket: false,
             restart_policy: None,
+            log_tags,
         };
 
         tracing::info!(
@@ -221,7 +252,20 @@ impl OrchestratorAgentRuntime {
                 Some(Ok((sandbox_result, handle)))
             }
             Err(e) => {
-                tracing::error!(%run_id, err = ?e, "orchestrator agent run failed");
+                // Capture container logs for Docker backends before returning.
+                if handle.backend == SandboxBackendKind::Docker {
+                    let logs = capture_container_logs(&handle.id, 100).await;
+                    tracing::error!(
+                        %run_id,
+                        container_id = %handle.id,
+                        host_port = handle.host_port,
+                        err = ?e,
+                        container_logs = %logs,
+                        "orchestrator agent run failed"
+                    );
+                } else {
+                    tracing::error!(%run_id, err = ?e, "orchestrator agent run failed");
+                }
                 Some(Err(e))
             }
         }
@@ -239,6 +283,13 @@ impl OrchestratorAgentRuntime {
     fn build_setup_script(&self, _mcp_token: &str) -> String {
         let mcp_host_url = &self.config.mcp_host_url;
         let mcp_namespace = &self.config.mcp_namespace;
+        // If the URL already has a scheme (e.g. https://…trycloudflare.com), use as-is;
+        // otherwise prepend http:// (legacy host:port format like host.docker.internal:8081).
+        let mcp_base = if mcp_host_url.starts_with("http://") || mcp_host_url.starts_with("https://") {
+            mcp_host_url.trim_end_matches('/').to_string()
+        } else {
+            format!("http://{mcp_host_url}")
+        };
 
         let mut lines = Vec::new();
 
@@ -248,7 +299,7 @@ impl OrchestratorAgentRuntime {
             r#"cat > /root/.codex/config.toml << 'TOML'
 [mcp_servers.{mcp_namespace}]
 enabled = true
-url = "http://{mcp_host_url}/mcp/{mcp_namespace}"
+url = "{mcp_base}/mcp/{mcp_namespace}"
 bearer_token_env_var = "ORCHESTRATOR_MCP_TOKEN"
 TOML"#,
         ));

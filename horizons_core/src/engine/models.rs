@@ -96,6 +96,14 @@ pub struct SandboxConfig {
     /// One-shot runs (`run_agent`) do not use this.
     #[serde(default)]
     pub restart_policy: Option<RestartPolicy>,
+
+    /// Optional structured tags for correlating sandbox session events in external sinks
+    /// (e.g. `run_id`, `project_id`, `task_key`, etc).
+    ///
+    /// These are NOT injected into the container environment; they are only used by the
+    /// host-side runtime when teeing universal events to sinks like VictoriaLogs.
+    #[serde(default)]
+    pub log_tags: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +126,7 @@ impl Default for SandboxConfig {
             workdir: None,
             docker_socket: false,
             restart_policy: None,
+            log_tags: HashMap::new(),
         }
     }
 }

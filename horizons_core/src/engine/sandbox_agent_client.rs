@@ -140,6 +140,25 @@ pub struct CreateSessionResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Session list types (for REST fallback health checks)
+// ---------------------------------------------------------------------------
+
+/// A single session entry from `GET /v1/sessions`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListEntry {
+    pub session_id: String,
+    #[serde(default)]
+    pub ended: bool,
+}
+
+/// Response from `GET /v1/sessions`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionListResponse {
+    pub sessions: Vec<SessionListEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // Legacy types (kept for backward compat with existing code)
 // ---------------------------------------------------------------------------
 
@@ -546,6 +565,32 @@ impl SandboxAgentClient {
             tracing::warn!(%text, "terminate_session returned non-success");
         }
         Ok(())
+    }
+
+    /// Check whether a session has ended via the REST API.
+    ///
+    /// `GET /v1/sessions` → find session by ID → return `ended` bool.
+    /// Returns `Ok(false)` if the session is not found (defensive).
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn is_session_ended(&self, session_id: &str) -> Result<bool> {
+        let req = self.apply_auth(self.http.get(self.url("/v1/sessions")));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::BackendMessage(format!(
+                "GET /v1/sessions failed: {text}"
+            )));
+        }
+        let list: SessionListResponse = resp
+            .json()
+            .await
+            .map_err(|e| Error::BackendMessage(format!("GET /v1/sessions: bad response: {e}")))?;
+        Ok(list
+            .sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .map(|s| s.ended)
+            .unwrap_or(false))
     }
 }
 

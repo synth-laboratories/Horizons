@@ -198,6 +198,7 @@ async fn run_engine(
         workdir: None,
         docker_socket: false,
         restart_policy: None,
+        log_tags: std::collections::HashMap::new(),
     };
 
     let (result, handle) = runtime.run_agent(&config, &req.instruction).await?;
@@ -249,6 +250,7 @@ async fn start_engine(
         workdir: None,
         docker_socket: false,
         restart_policy: None,
+        log_tags: std::collections::HashMap::new(),
     };
 
     let (run, _channels) = runtime

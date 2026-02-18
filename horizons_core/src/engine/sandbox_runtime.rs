@@ -7,6 +7,7 @@
 use crate::engine::models::{PermissionMode, SandboxConfig, SandboxHandle, SandboxResult};
 use crate::engine::sandbox_agent_client::SandboxAgentClient;
 use crate::engine::traits::SandboxBackend;
+use crate::engine::victoria_logs::{VictoriaLogsEmitter, VictoriaSessionCtx};
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -52,6 +53,7 @@ pub struct ActiveSandboxRun {
 pub struct SandboxRuntime {
     backend: Arc<dyn SandboxBackend>,
     active: DashMap<String, ActiveSandboxRun>,
+    victoria: Option<VictoriaLogsEmitter>,
 }
 
 impl SandboxRuntime {
@@ -59,6 +61,7 @@ impl SandboxRuntime {
         Self {
             backend,
             active: DashMap::new(),
+            victoria: VictoriaLogsEmitter::from_env(),
         }
     }
 
@@ -124,6 +127,8 @@ impl SandboxRuntime {
         config: &SandboxConfig,
         instruction: &str,
     ) -> Result<SandboxResult> {
+        let start = std::time::Instant::now();
+
         // 2. Wait for sandbox-agent to be healthy.
         self.backend.wait_ready(handle).await?;
         tracing::info!("sandbox-agent is ready");
@@ -159,6 +164,21 @@ impl SandboxRuntime {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<bool>();
         let client_sse = client.clone();
         let sid_sse = session_id.clone();
+        let victoria = self.victoria.clone();
+        let victoria_ctx = if victoria.is_some() {
+            Some(VictoriaSessionCtx {
+                sandbox_id: handle.id.clone(),
+                sandbox_backend: handle.backend,
+                sandbox_agent_url: handle.sandbox_agent_url.clone(),
+                host_port: handle.host_port,
+                session_id: session_id.clone(),
+                agent: config.agent,
+                tags: Arc::new(config.log_tags.clone()),
+            })
+        } else {
+            None
+        };
+        let victoria_ctx_sse = victoria_ctx.clone();
         let sse_task = tokio::spawn(async move {
             Self::sse_reader(
                 client_sse,
@@ -168,6 +188,8 @@ impl SandboxRuntime {
                 Some(completion_tx),
                 true,
                 None,
+                victoria,
+                victoria_ctx_sse,
             )
             .await;
         });
@@ -226,6 +248,16 @@ impl SandboxRuntime {
         sse_task.abort();
         let _ = client.terminate_session(&session_id).await;
 
+        // Emit a synthetic completion record to VictoriaLogs (best-effort).
+        if let (Some(v), Some(ctx)) = (self.victoria.as_ref(), victoria_ctx.as_ref()) {
+            v.enqueue_session_completed(
+                ctx,
+                completed,
+                start.elapsed().as_secs_f64(),
+                error_msg.as_deref(),
+            );
+        }
+
         Ok(SandboxResult {
             events: all_events,
             completed,
@@ -252,6 +284,8 @@ impl SandboxRuntime {
         completion_tx: Option<tokio::sync::oneshot::Sender<bool>>,
         complete_on_turn: bool,
         last_sse_epoch_ms: Option<Arc<AtomicI64>>,
+        victoria: Option<VictoriaLogsEmitter>,
+        victoria_ctx: Option<VictoriaSessionCtx>,
     ) {
         let resp = match client.events_sse_connect(session_id).await {
             Ok(r) => r,
@@ -267,8 +301,36 @@ impl SandboxRuntime {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         let mut completion_tx = completion_tx;
+        let sse_idle_timeout = Duration::from_secs(120);
+        let mut seq: u64 = 0;
 
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let chunk = match tokio::time::timeout(sse_idle_timeout, stream.next()).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break, // stream ended cleanly
+                Err(_timeout) => {
+                    // SSE idle timeout — check session status via REST fallback.
+                    tracing::info!("SSE idle timeout after 120s, checking session status via REST");
+                    match client.is_session_ended(session_id).await {
+                        Ok(true) => {
+                            tracing::info!("SSE idle timeout: session ended (confirmed via REST)");
+                            if let Some(tx) = completion_tx.take() {
+                                let _ = tx.send(true);
+                            }
+                            return;
+                        }
+                        Ok(false) => {
+                            tracing::debug!("SSE idle timeout: session still active per REST, continuing");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "SSE idle timeout: REST session check failed, treating as disconnected");
+                            break;
+                        }
+                    }
+                }
+            };
+
             let bytes = match chunk {
                 Ok(b) => b,
                 Err(e) => {
@@ -303,6 +365,12 @@ impl SandboxRuntime {
 
                     let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
                     tracing::debug!(%event_type, "SSE event received");
+                    seq = seq.saturating_add(1);
+
+                    // Tee to VictoriaLogs best-effort. Never block the SSE reader.
+                    if let (Some(v), Some(ctx)) = (victoria.as_ref(), victoria_ctx.as_ref()) {
+                        v.enqueue_event(ctx, seq, &event);
+                    }
 
                     // Update last-active timestamp.
                     if let Some(ref ts) = last_sse_epoch_ms {
@@ -479,6 +547,20 @@ impl SandboxRuntime {
         let last_sse_clone = last_sse_epoch_ms.clone();
         let client_sse = client.clone();
         let sid_sse = session_id.clone();
+        let victoria = self.victoria.clone();
+        let victoria_ctx = if victoria.is_some() {
+            Some(VictoriaSessionCtx {
+                sandbox_id: handle.id.clone(),
+                sandbox_backend: handle.backend,
+                sandbox_agent_url: handle.sandbox_agent_url.clone(),
+                host_port: handle.host_port,
+                session_id: session_id.clone(),
+                agent: config.agent,
+                tags: Arc::new(config.log_tags.clone()),
+            })
+        } else {
+            None
+        };
         let sse_task = tokio::spawn(async move {
             Self::sse_reader(
                 client_sse,
@@ -488,6 +570,8 @@ impl SandboxRuntime {
                 Some(completion_tx),
                 true,
                 Some(last_sse_clone),
+                victoria,
+                victoria_ctx,
             )
             .await;
         });
