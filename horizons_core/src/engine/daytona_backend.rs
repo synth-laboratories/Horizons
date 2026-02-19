@@ -177,7 +177,8 @@ impl SandboxBackend for DaytonaBackend {
         // Pre-start setup: write auth.json and execute SANDBOX_SETUP_SCRIPT.
         // Codex CLI `app-server` reads auth from ~/.codex/auth.json, NOT from
         // the OPENAI_API_KEY env var. Write the file so Codex can authenticate.
-        self.exec_in_sandbox(&sandbox.id, "mkdir -p /root/.codex").await?;
+        self.exec_in_sandbox(&sandbox.id, "mkdir -p /root/.codex")
+            .await?;
 
         if let Some(api_key) = config.env_vars.get("OPENAI_API_KEY") {
             // API keys are alphanumeric + hyphens/underscores, safe in double-quoted shell.

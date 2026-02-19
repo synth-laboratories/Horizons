@@ -91,7 +91,10 @@ impl DockerBackend {
         }
 
         std::fs::create_dir_all(&cache_dir).map_err(|e| {
-            Error::BackendMessage(format!("failed to create cache dir {}: {e}", cache_dir.display()))
+            Error::BackendMessage(format!(
+                "failed to create cache dir {}: {e}",
+                cache_dir.display()
+            ))
         })?;
 
         // 2. Try to find a local cargo build (cross-compiled for linux-musl).
@@ -109,7 +112,10 @@ impl DockerBackend {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755));
+                        let _ = std::fs::set_permissions(
+                            &bin_path,
+                            std::fs::Permissions::from_mode(0o755),
+                        );
                     }
                     self.sandbox_agent_bin = Some(bin_path.to_string_lossy().into_owned());
                     return Ok(());
@@ -124,12 +130,7 @@ impl DockerBackend {
         );
         let tmp_path = cache_dir.join(format!("{bin_name}.tmp"));
         let output = Command::new("curl")
-            .args([
-                "-fsSL",
-                &url,
-                "-o",
-                &tmp_path.to_string_lossy(),
-            ])
+            .args(["-fsSL", &url, "-o", &tmp_path.to_string_lossy()])
             .output()
             .await
             .map_err(|e| Error::backend("curl sandbox-agent", e))?;
@@ -148,9 +149,8 @@ impl DockerBackend {
             std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
                 .map_err(|e| Error::BackendMessage(format!("chmod sandbox-agent: {e}")))?;
         }
-        std::fs::rename(&tmp_path, &bin_path).map_err(|e| {
-            Error::BackendMessage(format!("rename sandbox-agent into cache: {e}"))
-        })?;
+        std::fs::rename(&tmp_path, &bin_path)
+            .map_err(|e| Error::BackendMessage(format!("rename sandbox-agent into cache: {e}")))?;
 
         tracing::info!(path = %bin_path.display(), "sandbox-agent binary cached");
         self.sandbox_agent_bin = Some(bin_path.to_string_lossy().into_owned());
@@ -203,14 +203,12 @@ impl DockerBackend {
             .next()
             .and_then(|line| line.rsplit(':').next())
             .ok_or_else(|| {
-                Error::BackendMessage(format!(
-                    "unexpected docker port output: {stdout}"
-                ))
+                Error::BackendMessage(format!("unexpected docker port output: {stdout}"))
             })?;
 
-        port_str.parse::<u16>().map_err(|e| {
-            Error::BackendMessage(format!("invalid port number '{port_str}': {e}"))
-        })
+        port_str
+            .parse::<u16>()
+            .map_err(|e| Error::BackendMessage(format!("invalid port number '{port_str}': {e}")))
     }
 
     /// Build the environment variable flags for `docker run`.
@@ -436,6 +434,7 @@ impl SandboxBackend for DockerBackend {
         let deadline = tokio::time::Instant::now() + HEALTH_TIMEOUT;
         let mut last_progress_log = std::time::Instant::now();
         let progress_interval = Duration::from_secs(30);
+        let mut retry_count: u64 = 0;
 
         loop {
             if tokio::time::Instant::now() > deadline {
@@ -451,14 +450,20 @@ impl SandboxBackend for DockerBackend {
             match client.get(&health_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     let elapsed = start.elapsed().as_secs();
-                    tracing::info!(elapsed_secs = elapsed, "sandbox-agent is healthy");
+                    tracing::info!(
+                        elapsed_secs = elapsed,
+                        retries = retry_count,
+                        "sandbox-agent is healthy"
+                    );
                     return Ok(());
                 }
                 Ok(resp) => {
-                    tracing::info!(status = %resp.status(), "health check not ready yet");
+                    retry_count += 1;
+                    tracing::debug!(status = %resp.status(), "health check not ready yet");
                 }
                 Err(e) => {
-                    tracing::info!(%e, "health check connection error, retrying");
+                    retry_count += 1;
+                    tracing::debug!(%e, "health check connection error, retrying");
                 }
             }
 
@@ -467,6 +472,7 @@ impl SandboxBackend for DockerBackend {
                 let elapsed = start.elapsed().as_secs();
                 let timeout = HEALTH_TIMEOUT.as_secs();
                 tracing::info!(
+                    retries = retry_count,
                     "still waiting for sandbox-agent health check ({elapsed}s / {timeout}s)"
                 );
                 last_progress_log = std::time::Instant::now();

@@ -35,7 +35,9 @@ pub struct ToolDef {
 /// Receives the `arguments` object from the `tools/call` request and returns
 /// either a JSON value (success) or a string error message.
 pub type ToolHandler = Arc<
-    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
+    dyn Fn(
+            serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -161,13 +163,14 @@ impl McpToolServer {
     /// - `notifications/initialized` → accepted as no-op notification (returns 204)
     /// - `tools/list` → returns registered tools
     /// - `tools/call` → calls tool handler and returns result
-    pub async fn handle_request(
-        &self,
-        auth_header: Option<&str>,
-        body: &[u8],
-    ) -> McpResponse {
+    pub async fn handle_request(&self, auth_header: Option<&str>, body: &[u8]) -> McpResponse {
         // 1. Authenticate.
         if let Err(resp) = self.check_auth(auth_header).await {
+            tracing::warn!(
+                server = %self.server_name,
+                status = resp.status,
+                "MCP auth failed"
+            );
             return resp;
         }
 
@@ -175,6 +178,12 @@ impl McpToolServer {
         let req: JsonRpcRequest = match serde_json::from_slice(body) {
             Ok(r) => r,
             Err(e) => {
+                tracing::error!(
+                    server = %self.server_name,
+                    err = %e,
+                    body_len = body.len(),
+                    "MCP JSON-RPC parse error"
+                );
                 return McpResponse {
                     status: 400,
                     headers: vec![],
@@ -192,10 +201,22 @@ impl McpToolServer {
             }
         };
 
+        tracing::info!(
+            server = %self.server_name,
+            method = %req.method,
+            id = %req.id,
+            "MCP JSON-RPC request"
+        );
+
         // 3. Handle notifications (no id, no response expected).
         //    MCP clients send `notifications/initialized` after the initialize handshake.
         //    Per the MCP Streamable HTTP transport spec, respond with 202 Accepted.
         if req.method.starts_with("notifications/") {
+            tracing::info!(
+                server = %self.server_name,
+                method = %req.method,
+                "MCP notification accepted"
+            );
             return McpResponse {
                 status: 202,
                 headers: vec![],
@@ -208,12 +229,35 @@ impl McpToolServer {
         let result = match req.method.as_str() {
             "initialize" => self.handle_initialize().await,
             "tools/list" => self.handle_tools_list().await,
-            "tools/call" => self.handle_tools_call(req.params).await,
+            "tools/call" => {
+                let tool_name = req.params.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                tracing::info!(
+                    server = %self.server_name,
+                    tool = %tool_name,
+                    "MCP tools/call dispatching"
+                );
+                self.handle_tools_call(req.params).await
+            }
             other => Err(JsonRpcError {
                 code: -32601,
                 message: format!("method not found: {other}"),
             }),
         };
+
+        match &result {
+            Ok(_) => tracing::info!(
+                server = %self.server_name,
+                method = %req.method,
+                "MCP request succeeded"
+            ),
+            Err(e) => tracing::error!(
+                server = %self.server_name,
+                method = %req.method,
+                code = e.code,
+                err = %e.message,
+                "MCP request failed"
+            ),
+        }
 
         let resp = match result {
             Ok(value) => JsonRpcResponse {
@@ -233,9 +277,10 @@ impl McpToolServer {
         // For the initialize response, include the Mcp-Session-Id header
         // as required by the MCP Streamable HTTP transport.
         let headers = if is_initialize {
-            vec![
-                ("Mcp-Session-Id".to_string(), uuid::Uuid::new_v4().to_string()),
-            ]
+            vec![(
+                "Mcp-Session-Id".to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            )]
         } else {
             vec![]
         };

@@ -14,8 +14,8 @@ use crate::engine::models::{AgentKind, SandboxBackendKind};
 use crate::{Error, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VictoriaLogsMode {
@@ -97,7 +97,9 @@ impl VictoriaLogsEmitter {
         if !insert_url.contains("_stream_fields=") {
             let sep = if insert_url.contains('?') { '&' } else { '?' };
             insert_url.push(sep);
-            insert_url.push_str("_stream_fields=service,component,deployment_env,host,sandbox_id,session_id");
+            insert_url.push_str(
+                "_stream_fields=service,component,deployment_env,host,sandbox_id,session_id",
+            );
         }
         if !insert_url.contains("_time_field=") {
             insert_url.push(if insert_url.contains('?') { '&' } else { '?' });
@@ -208,9 +210,7 @@ impl VictoriaLogsEmitter {
             }
         });
 
-        Self {
-            tx,
-        }
+        Self { tx }
     }
 
     pub fn enabled(&self) -> bool {
@@ -246,7 +246,11 @@ impl VictoriaLogsEmitter {
     }
 }
 
-async fn ingest_batch(http: &reqwest::Client, cfg: &VictoriaLogsConfig, buf: &[Envelope]) -> Result<()> {
+async fn ingest_batch(
+    http: &reqwest::Client,
+    cfg: &VictoriaLogsConfig,
+    buf: &[Envelope],
+) -> Result<()> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -261,7 +265,11 @@ async fn ingest_batch(http: &reqwest::Client, cfg: &VictoriaLogsConfig, buf: &[E
 
     let mut body = String::new();
     for env in buf {
-        let event_type = env.event.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let event_type = env
+            .event
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let ts = env
             .event
             .get("time")
@@ -273,28 +281,58 @@ async fn ingest_batch(http: &reqwest::Client, cfg: &VictoriaLogsConfig, buf: &[E
 
         let mut record = serde_json::Map::new();
         record.insert("ts".to_string(), serde_json::Value::String(ts));
-        record.insert("service".to_string(), serde_json::Value::String("horizons".to_string()));
-        record.insert("component".to_string(), serde_json::Value::String("sandbox".to_string()));
-        record.insert("deployment_env".to_string(), serde_json::Value::String(deployment_env.clone()));
+        record.insert(
+            "service".to_string(),
+            serde_json::Value::String("horizons".to_string()),
+        );
+        record.insert(
+            "component".to_string(),
+            serde_json::Value::String("sandbox".to_string()),
+        );
+        record.insert(
+            "deployment_env".to_string(),
+            serde_json::Value::String(deployment_env.clone()),
+        );
         record.insert("host".to_string(), serde_json::Value::String(host.clone()));
 
-        record.insert("sandbox_id".to_string(), serde_json::Value::String(env.ctx.sandbox_id.clone()));
-        record.insert("sandbox_backend".to_string(), serde_json::Value::String(format!("{:?}", env.ctx.sandbox_backend).to_lowercase()));
-        record.insert("sandbox_agent_url".to_string(), serde_json::Value::String(env.ctx.sandbox_agent_url.clone()));
+        record.insert(
+            "sandbox_id".to_string(),
+            serde_json::Value::String(env.ctx.sandbox_id.clone()),
+        );
+        record.insert(
+            "sandbox_backend".to_string(),
+            serde_json::Value::String(format!("{:?}", env.ctx.sandbox_backend).to_lowercase()),
+        );
+        record.insert(
+            "sandbox_agent_url".to_string(),
+            serde_json::Value::String(env.ctx.sandbox_agent_url.clone()),
+        );
         record.insert(
             "host_port".to_string(),
             serde_json::Value::Number(serde_json::Number::from(env.ctx.host_port as u64)),
         );
 
-        record.insert("session_id".to_string(), serde_json::Value::String(env.ctx.session_id.clone()));
-        record.insert("agent".to_string(), serde_json::Value::String(env.ctx.agent.to_string()));
+        record.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(env.ctx.session_id.clone()),
+        );
+        record.insert(
+            "agent".to_string(),
+            serde_json::Value::String(env.ctx.agent.to_string()),
+        );
         record.insert(
             "seq".to_string(),
             serde_json::Value::Number(serde_json::Number::from(env.seq)),
         );
 
-        record.insert("event_type".to_string(), serde_json::Value::String(event_type.to_string()));
-        record.insert("message".to_string(), serde_json::Value::String(format!("universal event: {event_type}")));
+        record.insert(
+            "event_type".to_string(),
+            serde_json::Value::String(event_type.to_string()),
+        );
+        record.insert(
+            "message".to_string(),
+            serde_json::Value::String(format!("universal event: {event_type}")),
+        );
         record.insert("raw".to_string(), env.event.clone());
 
         for (k, v) in env.ctx.tags.iter() {

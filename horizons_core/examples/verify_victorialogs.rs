@@ -1,5 +1,5 @@
-use horizons_core::engine::victoria_logs::{VictoriaLogsEmitter, VictoriaSessionCtx};
 use horizons_core::engine::models::{AgentKind, SandboxBackendKind};
+use horizons_core::engine::victoria_logs::{VictoriaLogsEmitter, VictoriaSessionCtx};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -28,7 +28,10 @@ async fn main() {
         tags: Arc::new(tags),
     };
 
-    for (i, et) in ["session.created", "turn.started", "turn.completed"].into_iter().enumerate() {
+    for (i, et) in ["session.created", "turn.started", "turn.completed"]
+        .into_iter()
+        .enumerate()
+    {
         let event = serde_json::json!({
             "type": et,
             "time": chrono::Utc::now().to_rfc3339(),
@@ -43,4 +46,3 @@ async fn main() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     println!("ok");
 }
-

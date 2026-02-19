@@ -4,13 +4,13 @@
 //! the agent completes. Enforces singleton semantics: if a run is already
 //! in progress, `run()` returns `None` immediately.
 
+use crate::Result;
 use crate::engine::docker_backend::capture_container_logs;
 use crate::engine::mcp_tool_server::McpToolServer;
 use crate::engine::models::{
     AgentKind, PermissionMode, SandboxBackendKind, SandboxConfig, SandboxResult,
 };
 use crate::engine::sandbox_runtime::SandboxRuntime;
-use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -139,7 +139,8 @@ impl OrchestratorAgentRuntime {
         instruction: &str,
         trigger: serde_json::Value,
     ) -> Option<Result<(SandboxResult, crate::engine::models::SandboxHandle)>> {
-        self.run_with_tags(instruction, trigger, HashMap::new()).await
+        self.run_with_tags(instruction, trigger, HashMap::new())
+            .await
     }
 
     /// Run the orchestrator agent with structured log tags that will be attached
@@ -290,11 +291,12 @@ impl OrchestratorAgentRuntime {
         let mcp_namespace = &self.config.mcp_namespace;
         // If the URL already has a scheme (e.g. https://…trycloudflare.com), use as-is;
         // otherwise prepend http:// (legacy host:port format like host.docker.internal:8081).
-        let mcp_base = if mcp_host_url.starts_with("http://") || mcp_host_url.starts_with("https://") {
-            mcp_host_url.trim_end_matches('/').to_string()
-        } else {
-            format!("http://{mcp_host_url}")
-        };
+        let mcp_base =
+            if mcp_host_url.starts_with("http://") || mcp_host_url.starts_with("https://") {
+                mcp_host_url.trim_end_matches('/').to_string()
+            } else {
+                format!("http://{mcp_host_url}")
+            };
 
         let mut lines = Vec::new();
 

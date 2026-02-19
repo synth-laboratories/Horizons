@@ -4,7 +4,9 @@
 //! provision container → create session → SSE event stream →
 //! post message → collect results → release.
 
-use crate::engine::models::{AgentKind, PermissionMode, SandboxConfig, SandboxHandle, SandboxResult};
+use crate::engine::models::{
+    AgentKind, PermissionMode, SandboxConfig, SandboxHandle, SandboxResult,
+};
 use crate::engine::sandbox_agent_client::SandboxAgentClient;
 use crate::engine::traits::SandboxBackend;
 use crate::engine::victoria_logs::{VictoriaLogsEmitter, VictoriaSessionCtx};
@@ -323,7 +325,9 @@ impl SandboxRuntime {
                             return;
                         }
                         Ok(false) => {
-                            tracing::debug!("SSE idle timeout: session still active per REST, continuing");
+                            tracing::debug!(
+                                "SSE idle timeout: session still active per REST, continuing"
+                            );
                             continue;
                         }
                         Err(e) => {
@@ -502,8 +506,13 @@ impl SandboxRuntime {
                     if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
                         for entry in content {
                             if let Some(output) = entry.get("output").and_then(|o| o.as_str()) {
-                                if output.contains("tool_use_error") && output.contains("No such tool") {
-                                    let tool_name = entry.get("call_id").and_then(|c| c.as_str()).unwrap_or("unknown");
+                                if output.contains("tool_use_error")
+                                    && output.contains("No such tool")
+                                {
+                                    let tool_name = entry
+                                        .get("call_id")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("unknown");
                                     tracing::error!(
                                         tool_call_id = tool_name,
                                         "MCP TOOL NOT AVAILABLE: agent tried to call a tool that is not registered. \

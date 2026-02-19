@@ -27,7 +27,7 @@ serde_json = "1.0.139"
 sha2 = "0.10"
 sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "sqlite", "uuid"] }
 thiserror = "2.0.11"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 tokio-stream = "0.1.17"
 tokio-util = "0.7"
 tracing = "0.1.41"
