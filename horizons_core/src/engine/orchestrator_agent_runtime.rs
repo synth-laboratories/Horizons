@@ -301,18 +301,28 @@ impl OrchestratorAgentRuntime {
         // Write agent-specific MCP config so the agent can reach our tool server.
         match self.config.agent {
             AgentKind::Claude => {
-                // Claude Code reads MCP config from ~/.claude/settings.json.
-                // Token is inlined (Daytona exec may not propagate sandbox env vars).
+                // Claude Code reads permissions from ~/.claude/settings.json
+                // and MCP servers from .mcp.json in the working directory.
                 lines.push("mkdir -p /root/.claude".to_string());
                 lines.push(format!(
-                    r#"cat > /root/.claude/settings.json << 'MCPJSON'
+                    r#"cat > /root/.claude/settings.json << 'SETTINGS'
 {{
   "permissions": {{
-    "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)"],
+    "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)", "mcp__{}(*)"],
     "deny": []
-  }},
+  }}
+}}
+SETTINGS"#,
+                    mcp_namespace,
+                ));
+                // MCP server config in the workdir (where Claude Code runs).
+                lines.push("mkdir -p /workspace".to_string());
+                lines.push(format!(
+                    r#"cat > /workspace/.mcp.json << 'MCPJSON'
+{{
   "mcpServers": {{
     "{mcp_namespace}": {{
+      "type": "url",
       "url": "{mcp_base}/mcp/{mcp_namespace}",
       "headers": {{
         "Authorization": "Bearer {mcp_token}"
