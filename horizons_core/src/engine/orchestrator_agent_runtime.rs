@@ -310,7 +310,7 @@ impl OrchestratorAgentRuntime {
                     r#"cat > /root/.claude/settings.json << 'SETTINGS'
 {{
   "permissions": {{
-    "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)", "mcp__{}(*)"],
+    "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)", "mcp__{}"],
     "deny": []
   }}
 }}

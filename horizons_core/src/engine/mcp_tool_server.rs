@@ -230,7 +230,11 @@ impl McpToolServer {
             "initialize" => self.handle_initialize().await,
             "tools/list" => self.handle_tools_list().await,
             "tools/call" => {
-                let tool_name = req.params.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let tool_name = req
+                    .params
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("?");
                 tracing::info!(
                     server = %self.server_name,
                     tool = %tool_name,
