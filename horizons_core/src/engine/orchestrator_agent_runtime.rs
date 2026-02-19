@@ -285,7 +285,7 @@ impl OrchestratorAgentRuntime {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    fn build_setup_script(&self, _mcp_token: &str) -> String {
+    fn build_setup_script(&self, mcp_token: &str) -> String {
         let mcp_host_url = &self.config.mcp_host_url;
         let mcp_namespace = &self.config.mcp_namespace;
         // If the URL already has a scheme (e.g. https://…trycloudflare.com), use as-is;
@@ -302,10 +302,10 @@ impl OrchestratorAgentRuntime {
         match self.config.agent {
             AgentKind::Claude => {
                 // Claude Code reads MCP config from ~/.claude/settings.json.
-                // Unquoted heredoc so $ORCHESTRATOR_MCP_TOKEN is expanded by the shell.
+                // Token is inlined (Daytona exec may not propagate sandbox env vars).
                 lines.push("mkdir -p /root/.claude".to_string());
                 lines.push(format!(
-                    r#"cat > /root/.claude/settings.json << MCPJSON
+                    r#"cat > /root/.claude/settings.json << 'MCPJSON'
 {{
   "permissions": {{
     "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)"],
@@ -315,7 +315,7 @@ impl OrchestratorAgentRuntime {
     "{mcp_namespace}": {{
       "url": "{mcp_base}/mcp/{mcp_namespace}",
       "headers": {{
-        "Authorization": "Bearer $ORCHESTRATOR_MCP_TOKEN"
+        "Authorization": "Bearer {mcp_token}"
       }}
     }}
   }}
