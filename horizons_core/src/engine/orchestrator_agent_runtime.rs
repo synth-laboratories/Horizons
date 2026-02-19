@@ -298,16 +298,44 @@ impl OrchestratorAgentRuntime {
 
         let mut lines = Vec::new();
 
-        // Write Codex MCP config so the agent can reach our tool server.
-        lines.push("mkdir -p /root/.codex".to_string());
-        lines.push(format!(
-            r#"cat > /root/.codex/config.toml << 'TOML'
+        // Write agent-specific MCP config so the agent can reach our tool server.
+        match self.config.agent {
+            AgentKind::Claude => {
+                // Claude Code reads MCP config from ~/.claude/settings.json.
+                // Unquoted heredoc so $ORCHESTRATOR_MCP_TOKEN is expanded by the shell.
+                lines.push("mkdir -p /root/.claude".to_string());
+                lines.push(format!(
+                    r#"cat > /root/.claude/settings.json << MCPJSON
+{{
+  "permissions": {{
+    "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)", "WebFetch(*)", "WebSearch(*)"],
+    "deny": []
+  }},
+  "mcpServers": {{
+    "{mcp_namespace}": {{
+      "url": "{mcp_base}/mcp/{mcp_namespace}",
+      "headers": {{
+        "Authorization": "Bearer $ORCHESTRATOR_MCP_TOKEN"
+      }}
+    }}
+  }}
+}}
+MCPJSON"#,
+                ));
+            }
+            _ => {
+                // Codex reads MCP config from ~/.codex/config.toml.
+                lines.push("mkdir -p /root/.codex".to_string());
+                lines.push(format!(
+                    r#"cat > /root/.codex/config.toml << 'TOML'
 [mcp_servers.{mcp_namespace}]
 enabled = true
 url = "{mcp_base}/mcp/{mcp_namespace}"
 bearer_token_env_var = "ORCHESTRATOR_MCP_TOKEN"
 TOML"#,
-        ));
+                ));
+            }
+        }
 
         // Append extra setup lines (repo cloning, etc.)
         for line in &self.config.extra_setup_lines {

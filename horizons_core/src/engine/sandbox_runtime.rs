@@ -4,7 +4,7 @@
 //! provision container → create session → SSE event stream →
 //! post message → collect results → release.
 
-use crate::engine::models::{PermissionMode, SandboxConfig, SandboxHandle, SandboxResult};
+use crate::engine::models::{AgentKind, PermissionMode, SandboxConfig, SandboxHandle, SandboxResult};
 use crate::engine::sandbox_agent_client::SandboxAgentClient;
 use crate::engine::traits::SandboxBackend;
 use crate::engine::victoria_logs::{VictoriaLogsEmitter, VictoriaSessionCtx};
@@ -140,8 +140,11 @@ impl SandboxRuntime {
 
         // 4. Create REST session.
         let model_ref = config.model.as_deref();
-        let perm_mode = match config.permission_mode {
-            PermissionMode::Bypass => Some("bypass"),
+        // Claude rejects "bypass" permission mode when running as root (common in
+        // containers). Send default mode; SSE reader still auto-approves via bypass_perms flag.
+        let perm_mode = match (config.permission_mode, config.agent) {
+            (PermissionMode::Bypass, AgentKind::Claude) => None,
+            (PermissionMode::Bypass, _) => Some("bypass"),
             _ => None,
         };
         let create_resp = client
@@ -520,9 +523,12 @@ impl SandboxRuntime {
         let agent_str = config.agent.as_sandbox_agent_str();
 
         // Create REST session.
+        // Claude rejects "bypass" permission mode when running as root (common in
+        // containers). Send default mode; SSE reader still auto-approves via bypass_perms flag.
         let model_ref = config.model.as_deref();
-        let perm_mode = match config.permission_mode {
-            PermissionMode::Bypass => Some("bypass"),
+        let perm_mode = match (config.permission_mode, config.agent) {
+            (PermissionMode::Bypass, AgentKind::Claude) => None,
+            (PermissionMode::Bypass, _) => Some("bypass"),
             _ => None,
         };
         let create_resp = client
