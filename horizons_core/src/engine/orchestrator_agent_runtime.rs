@@ -322,7 +322,7 @@ SETTINGS"#,
 {{
   "mcpServers": {{
     "{mcp_namespace}": {{
-      "type": "url",
+      "type": "http",
       "url": "{mcp_base}/mcp/{mcp_namespace}",
       "headers": {{
         "Authorization": "Bearer {mcp_token}"

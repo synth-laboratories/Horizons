@@ -492,10 +492,34 @@ impl SandboxRuntime {
                 output_buf.get_or_insert_with(String::new).push_str(delta);
             }
         } else if event_type == "item.completed" {
-            // Completed items may have final text content.
             if let Some(item) = event.get("data").and_then(|d| d.get("item")) {
                 let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("");
                 let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+
+                // Detect MCP tool errors early — these indicate the MCP server
+                // failed to connect and the agent cannot use remote tools.
+                if kind == "tool_result" {
+                    if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                        for entry in content {
+                            if let Some(output) = entry.get("output").and_then(|o| o.as_str()) {
+                                if output.contains("tool_use_error") && output.contains("No such tool") {
+                                    let tool_name = entry.get("call_id").and_then(|c| c.as_str()).unwrap_or("unknown");
+                                    tracing::error!(
+                                        tool_call_id = tool_name,
+                                        "MCP TOOL NOT AVAILABLE: agent tried to call a tool that is not registered. \
+                                         This usually means the MCP server in .mcp.json failed to connect. \
+                                         Check: (1) .mcp.json type is 'http' not 'url', \
+                                         (2) MCP server URL is reachable from the sandbox, \
+                                         (3) auth token is valid. Output: {}",
+                                        &output[..output.len().min(300)]
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Completed items may have final text content.
                 if role == "assistant" && kind == "message" {
                     if let Some(content) = item.get("content").and_then(|c| c.as_str()) {
                         *output_buf = Some(content.to_string());
