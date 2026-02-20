@@ -2,6 +2,7 @@
 //! plus a full sandbox runtime for running Codex/Claude/OpenCode agents
 //! inside Docker or Daytona containers via sandbox-agent.
 
+pub mod actor_runtime_contract;
 pub mod daytona_backend;
 pub mod docker_backend;
 pub mod health_monitor;
