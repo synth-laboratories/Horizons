@@ -153,6 +153,11 @@ impl McpToolServer {
         self.sessions.write().await.remove(token);
     }
 
+    /// Check whether a bearer token is currently registered for this server.
+    pub async fn has_session_token(&self, token: &str) -> bool {
+        self.sessions.read().await.contains_key(token)
+    }
+
     /// Handle an incoming HTTP request (framework-agnostic).
     ///
     /// `auth_header` should be the value of the `Authorization` header (e.g.

@@ -15,6 +15,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+fn scripted_agent_mode_enabled() -> bool {
+    std::env::var("SMR_SCRIPTED_AGENT_MODE")
+        .ok()
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            matches!(n.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -230,6 +240,52 @@ impl OrchestratorAgentRuntime {
             host_port = handle.host_port,
             "orchestrator container provisioned"
         );
+
+        // Scripted deterministic mode:
+        // keep real sandbox provisioning/health/release, but skip external agent/LLM calls.
+        if scripted_agent_mode_enabled() {
+            let ready = self.sandbox.backend().wait_ready(&handle).await;
+            if let Err(e) = ready {
+                tracing::error!(%run_id, err = ?e, "scripted mode wait_ready failed");
+                let _ = self.sandbox.backend().release(&handle).await;
+                self.mcp_server.revoke_session(&mcp_token).await;
+                *self.running.lock().await = None;
+                return Some(Err(e));
+            }
+
+            let mut sandbox_result = SandboxResult {
+                events: vec![
+                    serde_json::json!({
+                        "type": "session.created",
+                        "data": { "mode": "scripted_agent" },
+                    }),
+                    serde_json::json!({
+                        "type": "turn.completed",
+                        "data": { "mode": "scripted_agent", "completed": true },
+                    }),
+                ],
+                completed: true,
+                duration_seconds: start.elapsed().as_secs_f64(),
+                final_output: Some("scripted_agent_mode".to_string()),
+                error: None,
+            };
+
+            if let Err(e) = self.sandbox.backend().release(&handle).await {
+                tracing::warn!(%run_id, %e, "failed to release orchestrator container in scripted mode");
+            }
+
+            self.mcp_server.revoke_session(&mcp_token).await;
+            *self.running.lock().await = None;
+
+            sandbox_result.duration_seconds = start.elapsed().as_secs_f64();
+            tracing::info!(
+                %run_id,
+                completed = sandbox_result.completed,
+                duration = sandbox_result.duration_seconds,
+                "orchestrator scripted run finished"
+            );
+            return Some(Ok((sandbox_result, handle)));
+        }
 
         // ── Run the agent session (blocking) ─────────────────────────────
         let result = self

@@ -19,7 +19,7 @@ use crate::mapping::eval_mapping_expression;
 use crate::python;
 use crate::run::RunConfig;
 use crate::template::render_messages;
-use crate::tools::{LocalToolState, SharedLocalToolState, ToolExecutor};
+use crate::tools::{DefaultToolExecutor, LocalToolState, SharedLocalToolState, ToolExecutor};
 use crate::trace::{SandboxTiming, TraceBuilder};
 
 pub struct GraphEngine {
@@ -407,6 +407,7 @@ impl GraphEngine {
                     impl_obj,
                     usage,
                     trace_handle,
+                    run_config,
                     graph_inputs,
                 )
                 .await
@@ -700,6 +701,7 @@ impl GraphEngine {
         impl_obj: &Map<String, Value>,
         usage: &mut UsageAccumulator,
         trace_handle: Arc<Mutex<TraceBuilder>>,
+        run_config: Option<&RunConfig>,
         _graph_inputs: &Value,
     ) -> Result<Value> {
         let model_name = impl_obj
@@ -840,8 +842,15 @@ impl GraphEngine {
             node_name: node.name.clone(),
         };
 
+        let tools: Arc<dyn ToolExecutor> =
+            if let Some(tool_cfg) = run_config.and_then(|cfg| cfg.tool_executor.clone()) {
+                Arc::new(DefaultToolExecutor::from_request_config(Some(&tool_cfg)))
+            } else {
+                self.tools.clone()
+            };
+
         let tool_executor = GraphToolExecutor {
-            tools: self.tools.clone(),
+            tools,
             local_tool_state: local_tool_state.clone(),
         };
 
@@ -1062,6 +1071,26 @@ impl crate::rlm_v1::ToolExecutor for GraphToolExecutor {
         call: crate::rlm_v1::ToolCall,
         ctx: crate::rlm_v1::ToolContext,
     ) -> std::result::Result<crate::rlm_v1::ToolResult, crate::rlm_v1::ToolError> {
+        let mut call_args = call.arguments.clone();
+        if call.name == "query_run_logs" {
+            if let Value::Object(map) = &mut call_args {
+                if !map.contains_key("run_id") {
+                    map.insert("run_id".to_string(), json!(ctx.run_id));
+                }
+                if !map.contains_key("task_key") {
+                    map.insert("task_key".to_string(), json!(ctx.node_name));
+                }
+                if !map.contains_key("project_id")
+                    && let Some(project_id) = ctx
+                        .inputs
+                        .get("project_id")
+                        .or_else(|| ctx.inputs.get("project").and_then(|v| v.get("id")))
+                        .and_then(|v| v.as_str())
+                {
+                    map.insert("project_id".to_string(), json!(project_id));
+                }
+            }
+        }
         let context = json!({
             "run_id": ctx.run_id,
             "node": ctx.node_name,
@@ -1072,7 +1101,7 @@ impl crate::rlm_v1::ToolExecutor for GraphToolExecutor {
             .tools
             .execute(
                 &call.name,
-                &call.arguments,
+                &call_args,
                 &context,
                 Some(&self.local_tool_state),
                 Some(ctx.inputs.as_ref()),

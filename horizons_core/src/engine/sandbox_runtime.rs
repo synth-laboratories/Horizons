@@ -17,6 +17,17 @@ use futures_util::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
+use tokio::sync::mpsc::error::TrySendError;
+
+fn scripted_agent_mode_enabled() -> bool {
+    std::env::var("SMR_SCRIPTED_AGENT_MODE")
+        .ok()
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            matches!(n.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
 
 /// Channels returned by `start_agent()` for monitoring a fire-and-forget session.
 ///
@@ -93,6 +104,32 @@ impl SandboxRuntime {
         // 1. Provision the container.
         let handle = self.backend.provision(config).await?;
         tracing::info!(handle_id = %handle.id, "sandbox provisioned");
+
+        // Scripted deterministic mode:
+        // keep real sandbox provisioning/health/release, but skip external agent/LLM calls.
+        if scripted_agent_mode_enabled() {
+            self.backend.wait_ready(&handle).await?;
+            let synthetic = SandboxResult {
+                events: vec![
+                    serde_json::json!({
+                        "type": "session.created",
+                        "data": { "mode": "scripted_agent" },
+                    }),
+                    serde_json::json!({
+                        "type": "turn.completed",
+                        "data": { "mode": "scripted_agent", "completed": true },
+                    }),
+                ],
+                completed: true,
+                duration_seconds: start.elapsed().as_secs_f64(),
+                final_output: Some("scripted_agent_mode".to_string()),
+                error: None,
+            };
+            if let Err(e) = self.backend.release(&handle).await {
+                tracing::warn!(%e, "failed to release sandbox in scripted mode");
+            }
+            return Ok((synthetic, handle));
+        }
 
         // Run the session, ensuring we release on both success and failure.
         let result = self
@@ -466,10 +503,19 @@ impl SandboxRuntime {
                         }
                     }
 
-                    // Forward to collector (ignore send errors — receiver may be
-                    // dropped in fire-and-forget mode, but we must keep running
-                    // for permission auto-approval).
-                    let _ = events_tx.send(event).await;
+                    // Forward to collector. Avoid blocking the SSE reader on
+                    // high-volume delta streams, otherwise completion signals can
+                    // be delayed indefinitely under backpressure.
+                    let is_delta = event_type == "item.delta";
+                    match events_tx.try_send(event) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(ev)) => {
+                            if !is_delta {
+                                let _ = events_tx.send(ev).await;
+                            }
+                        }
+                        Err(TrySendError::Closed(_)) => {}
+                    }
                 }
             }
         }
