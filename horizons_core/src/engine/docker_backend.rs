@@ -459,11 +459,23 @@ impl SandboxBackend for DockerBackend {
                 }
                 Ok(resp) => {
                     retry_count += 1;
-                    tracing::debug!(status = %resp.status(), "health check not ready yet");
+                    if retry_count == 1 || retry_count % 10 == 0 {
+                        tracing::debug!(
+                            retries = retry_count,
+                            status = %resp.status(),
+                            "health check not ready yet"
+                        );
+                    }
                 }
                 Err(e) => {
                     retry_count += 1;
-                    tracing::debug!(%e, "health check connection error, retrying");
+                    if retry_count == 1 || retry_count % 10 == 0 {
+                        tracing::debug!(
+                            retries = retry_count,
+                            %e,
+                            "health check connection error, retrying"
+                        );
+                    }
                 }
             }
 

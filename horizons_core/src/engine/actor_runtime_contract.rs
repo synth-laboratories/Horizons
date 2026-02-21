@@ -42,6 +42,15 @@ pub enum MessageMode {
     Interrupt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    Pending,
+    Applied,
+    Rejected,
+    Ignored,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub enum ControlAction {
@@ -64,6 +73,42 @@ pub struct ControlMessage {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<ControlAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeMessage {
+    pub id: String,
+    /// Stable per-run ordering key supplied by caller.
+    pub seq: u64,
+    pub mode: MessageMode,
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ControlAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageDeliveryReceipt {
+    pub receipt_id: String,
+    pub message_id: String,
+    pub run_id: String,
+    pub tick_id: TickId,
+    pub status: DeliveryStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskDependencyPolicy {
+    OnSuccessStartDownstream,
+    OnFailurePauseDownstream,
+    OnFailureCancelDownstream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,11 +143,17 @@ pub struct TickState {
 #[serde(rename_all = "snake_case")]
 pub enum TransitionKind {
     Paused,
+    PauseNoop,
     Resumed,
+    ResumeNoop,
+    MessageDelivered,
     PromotedToMasterDebug,
+    PromoteNoop,
     DemotedToSlave,
+    DemoteNoop,
     ElectedPrimaryMaster,
     DemotedExtraPrimaryMaster,
+    DemotedStalePrimaryMaster,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +171,12 @@ pub struct RejectedIntent {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedControl {
+    pub message_id: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TickOutcome {
     pub next_tick_id: TickId,
@@ -130,6 +187,124 @@ pub struct TickOutcome {
     pub transitions: Vec<TickTransition>,
     pub accepted_intents: Vec<ProposedIntent>,
     pub rejected_intents: Vec<RejectedIntent>,
+    #[serde(default)]
+    pub rejected_controls: Vec<RejectedControl>,
+}
+
+impl TickOutcome {
+    pub fn control_delivery_status(&self, message_id: &str) -> DeliveryStatus {
+        if self
+            .rejected_controls
+            .iter()
+            .any(|r| r.message_id == message_id)
+        {
+            return DeliveryStatus::Rejected;
+        }
+        if self
+            .transitions
+            .iter()
+            .any(|t| t.source.as_deref() == Some(message_id))
+        {
+            return DeliveryStatus::Applied;
+        }
+        DeliveryStatus::Ignored
+    }
+
+    pub fn control_rejection_reason(&self, message_id: &str) -> Option<&str> {
+        self.rejected_controls
+            .iter()
+            .find(|r| r.message_id == message_id)
+            .map(|r| r.reason.as_str())
+    }
+}
+
+impl RuntimeMessage {
+    pub fn as_control_message(&self) -> Option<ControlMessage> {
+        self.action.as_ref()?;
+        Some(ControlMessage {
+            id: self.id.clone(),
+            seq: self.seq,
+            mode: self.mode,
+            from: self.from.clone(),
+            to: self.to.clone(),
+            body: self.body.clone(),
+            action: self.action.clone(),
+        })
+    }
+}
+
+pub fn parse_message_mode(value: &str) -> Option<MessageMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "queue" => Some(MessageMode::Queue),
+        "steer" => Some(MessageMode::Steer),
+        "interrupt" => Some(MessageMode::Interrupt),
+        _ => None,
+    }
+}
+
+pub fn message_mode_str(mode: MessageMode) -> &'static str {
+    match mode {
+        MessageMode::Queue => "queue",
+        MessageMode::Steer => "steer",
+        MessageMode::Interrupt => "interrupt",
+    }
+}
+
+pub fn parse_control_action(
+    action: &str,
+    payload: Option<&serde_json::Value>,
+) -> Option<ControlAction> {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "pause_run" => Some(ControlAction::PauseRun),
+        "resume_run" => Some(ControlAction::ResumeRun),
+        "promote_to_master_debug" => {
+            let worker_id = payload
+                .and_then(|v| v.get("worker_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            Some(ControlAction::PromoteToMasterDebug { worker_id })
+        }
+        "demote_to_slave" => {
+            let worker_id = payload
+                .and_then(|v| v.get("worker_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            Some(ControlAction::DemoteToSlave { worker_id })
+        }
+        _ => None,
+    }
+}
+
+pub fn control_action_name(action: &ControlAction) -> &'static str {
+    match action {
+        ControlAction::PauseRun => "pause_run",
+        ControlAction::ResumeRun => "resume_run",
+        ControlAction::PromoteToMasterDebug { .. } => "promote_to_master_debug",
+        ControlAction::DemoteToSlave { .. } => "demote_to_slave",
+    }
+}
+
+pub fn control_action_payload(action: &ControlAction) -> Option<serde_json::Value> {
+    match action {
+        ControlAction::PauseRun | ControlAction::ResumeRun => None,
+        ControlAction::PromoteToMasterDebug { worker_id }
+        | ControlAction::DemoteToSlave { worker_id } => {
+            Some(serde_json::json!({ "worker_id": worker_id }))
+        }
+    }
+}
+
+pub fn delivery_status_str(status: DeliveryStatus) -> &'static str {
+    match status {
+        DeliveryStatus::Pending => "pending",
+        DeliveryStatus::Applied => "applied",
+        DeliveryStatus::Rejected => "rejected",
+        DeliveryStatus::Ignored => "ignored",
+    }
 }
 
 /// Advance a run by one logical tick.
@@ -145,6 +320,7 @@ pub fn advance_tick(
 ) -> TickOutcome {
     let mut paused = state.paused;
     let mut transitions = Vec::new();
+    let mut rejected_controls = Vec::new();
 
     let mut workers: BTreeMap<String, WorkerLease> = state
         .workers
@@ -161,6 +337,21 @@ pub fn advance_tick(
 
     for msg in &control_messages {
         let Some(action) = msg.action.as_ref() else {
+            match msg.mode {
+                MessageMode::Interrupt => {
+                    rejected_controls.push(RejectedControl {
+                        message_id: msg.id.clone(),
+                        reason: "interrupt_requires_action".to_string(),
+                    });
+                }
+                MessageMode::Queue | MessageMode::Steer => {
+                    transitions.push(TickTransition {
+                        kind: TransitionKind::MessageDelivered,
+                        worker_id: None,
+                        source: Some(msg.id.clone()),
+                    });
+                }
+            }
             continue;
         };
         match action {
@@ -169,6 +360,12 @@ pub fn advance_tick(
                     paused = true;
                     transitions.push(TickTransition {
                         kind: TransitionKind::Paused,
+                        worker_id: None,
+                        source: Some(msg.id.clone()),
+                    });
+                } else {
+                    transitions.push(TickTransition {
+                        kind: TransitionKind::PauseNoop,
                         worker_id: None,
                         source: Some(msg.id.clone()),
                     });
@@ -182,32 +379,90 @@ pub fn advance_tick(
                         worker_id: None,
                         source: Some(msg.id.clone()),
                     });
+                } else {
+                    transitions.push(TickTransition {
+                        kind: TransitionKind::ResumeNoop,
+                        worker_id: None,
+                        source: Some(msg.id.clone()),
+                    });
                 }
             }
             ControlAction::PromoteToMasterDebug { worker_id } => {
-                if let Some(worker) = workers.get_mut(worker_id)
-                    && worker.role != WorkerRole::MasterDebug
-                {
-                    worker.role = WorkerRole::MasterDebug;
-                    transitions.push(TickTransition {
-                        kind: TransitionKind::PromotedToMasterDebug,
-                        worker_id: Some(worker_id.clone()),
-                        source: Some(msg.id.clone()),
+                if msg.to.as_deref().is_some_and(|to| to != worker_id) {
+                    rejected_controls.push(RejectedControl {
+                        message_id: msg.id.clone(),
+                        reason: "target_mismatch".to_string(),
+                    });
+                    continue;
+                }
+                if let Some(worker) = workers.get_mut(worker_id) {
+                    if worker.role != WorkerRole::MasterDebug {
+                        worker.role = WorkerRole::MasterDebug;
+                        transitions.push(TickTransition {
+                            kind: TransitionKind::PromotedToMasterDebug,
+                            worker_id: Some(worker_id.clone()),
+                            source: Some(msg.id.clone()),
+                        });
+                    } else {
+                        transitions.push(TickTransition {
+                            kind: TransitionKind::PromoteNoop,
+                            worker_id: Some(worker_id.clone()),
+                            source: Some(msg.id.clone()),
+                        });
+                    }
+                } else {
+                    rejected_controls.push(RejectedControl {
+                        message_id: msg.id.clone(),
+                        reason: "unknown_worker".to_string(),
                     });
                 }
             }
             ControlAction::DemoteToSlave { worker_id } => {
-                if let Some(worker) = workers.get_mut(worker_id)
-                    && worker.role != WorkerRole::Slave
-                {
-                    worker.role = WorkerRole::Slave;
-                    transitions.push(TickTransition {
-                        kind: TransitionKind::DemotedToSlave,
-                        worker_id: Some(worker_id.clone()),
-                        source: Some(msg.id.clone()),
+                if msg.to.as_deref().is_some_and(|to| to != worker_id) {
+                    rejected_controls.push(RejectedControl {
+                        message_id: msg.id.clone(),
+                        reason: "target_mismatch".to_string(),
+                    });
+                    continue;
+                }
+                if let Some(worker) = workers.get_mut(worker_id) {
+                    if worker.role != WorkerRole::Slave {
+                        worker.role = WorkerRole::Slave;
+                        transitions.push(TickTransition {
+                            kind: TransitionKind::DemotedToSlave,
+                            worker_id: Some(worker_id.clone()),
+                            source: Some(msg.id.clone()),
+                        });
+                    } else {
+                        transitions.push(TickTransition {
+                            kind: TransitionKind::DemoteNoop,
+                            worker_id: Some(worker_id.clone()),
+                            source: Some(msg.id.clone()),
+                        });
+                    }
+                } else {
+                    rejected_controls.push(RejectedControl {
+                        message_id: msg.id.clone(),
+                        reason: "unknown_worker".to_string(),
                     });
                 }
             }
+        }
+    }
+
+    // Convert unhealthy/expired primary leases into debug role before election.
+    // This prevents stale primary labels from surviving across ticks and keeps
+    // "who is currently primary" derivable from role + lease validity.
+    for worker in workers.values_mut() {
+        if worker.role == WorkerRole::MasterPrimary
+            && (!worker.healthy || worker.lease_expires_tick < state.tick_id)
+        {
+            worker.role = WorkerRole::MasterDebug;
+            transitions.push(TickTransition {
+                kind: TransitionKind::DemotedStalePrimaryMaster,
+                worker_id: Some(worker.worker_id.clone()),
+                source: None,
+            });
         }
     }
 
@@ -264,8 +519,17 @@ pub fn advance_tick(
     };
 
     proposed_intents.sort_by(|a, b| {
-        a.idempotency_key
-            .cmp(&b.idempotency_key)
+        let a_priority = workers
+            .get(&a.from_worker_id)
+            .map(|w| intent_role_priority(w.role))
+            .unwrap_or(u8::MAX);
+        let b_priority = workers
+            .get(&b.from_worker_id)
+            .map(|w| intent_role_priority(w.role))
+            .unwrap_or(u8::MAX);
+        a_priority
+            .cmp(&b_priority)
+            .then(a.idempotency_key.cmp(&b.idempotency_key))
             .then(a.from_worker_id.cmp(&b.from_worker_id))
     });
 
@@ -302,6 +566,20 @@ pub fn advance_tick(
             });
             continue;
         }
+        if !worker.healthy {
+            rejected_intents.push(RejectedIntent {
+                idempotency_key: intent.idempotency_key,
+                reason: "intent_worker_unhealthy".to_string(),
+            });
+            continue;
+        }
+        if worker.lease_expires_tick < state.tick_id {
+            rejected_intents.push(RejectedIntent {
+                idempotency_key: intent.idempotency_key,
+                reason: "intent_worker_lease_expired".to_string(),
+            });
+            continue;
+        }
         if paused && intent.kind != IntentKind::RequestHumanInput {
             rejected_intents.push(RejectedIntent {
                 idempotency_key: intent.idempotency_key,
@@ -320,6 +598,7 @@ pub fn advance_tick(
         transitions,
         accepted_intents,
         rejected_intents,
+        rejected_controls,
     }
 }
 
@@ -328,6 +607,15 @@ fn mode_priority(mode: MessageMode) -> u8 {
         MessageMode::Interrupt => 0,
         MessageMode::Steer => 1,
         MessageMode::Queue => 2,
+    }
+}
+
+fn intent_role_priority(role: WorkerRole) -> u8 {
+    match role {
+        WorkerRole::MasterPrimary => 0,
+        WorkerRole::MasterDebug => 1,
+        WorkerRole::Slave => 2,
+        WorkerRole::Observer => 3,
     }
 }
 
@@ -388,6 +676,23 @@ mod tests {
     }
 
     #[test]
+    fn demotes_stale_primary_and_re_elects() {
+        let mut stale_primary = worker("w2", WorkerRole::MasterPrimary);
+        stale_primary.healthy = false;
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 10,
+            paused: false,
+            workers: vec![stale_primary, worker("w1", WorkerRole::MasterDebug)],
+        };
+        let out = advance_tick(state, vec![], vec![]);
+        assert_eq!(out.primary_master_worker_id.as_deref(), Some("w1"));
+        assert!(out.transitions.iter().any(|t| {
+            t.kind == TransitionKind::DemotedStalePrimaryMaster && t.worker_id.as_deref() == Some("w2")
+        }));
+    }
+
+    #[test]
     fn rejects_slave_intents_and_paused_intents() {
         let state = TickState {
             run_id: "r1".to_string(),
@@ -426,6 +731,48 @@ mod tests {
     }
 
     #[test]
+    fn rejects_intents_from_unhealthy_or_expired_master() {
+        let mut unhealthy_master = worker("master-unhealthy", WorkerRole::MasterPrimary);
+        unhealthy_master.healthy = false;
+        let mut expired_master = worker("master-expired", WorkerRole::MasterPrimary);
+        expired_master.lease_expires_tick = 1;
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 10,
+            paused: false,
+            workers: vec![unhealthy_master, expired_master],
+        };
+        let intents = vec![
+            ProposedIntent {
+                idempotency_key: "i-unhealthy".to_string(),
+                from_worker_id: "master-unhealthy".to_string(),
+                kind: IntentKind::PlanTasks,
+                detail: serde_json::json!({}),
+            },
+            ProposedIntent {
+                idempotency_key: "i-expired".to_string(),
+                from_worker_id: "master-expired".to_string(),
+                kind: IntentKind::PlanTasks,
+                detail: serde_json::json!({}),
+            },
+        ];
+
+        let out = advance_tick(state, vec![], intents);
+        assert!(out.accepted_intents.is_empty());
+        assert_eq!(out.rejected_intents.len(), 2);
+        assert!(
+            out.rejected_intents
+                .iter()
+                .any(|r| r.reason == "intent_worker_unhealthy")
+        );
+        assert!(
+            out.rejected_intents
+                .iter()
+                .any(|r| r.reason == "intent_worker_lease_expired")
+        );
+    }
+
+    #[test]
     fn control_promotion_applies_before_election() {
         let state = TickState {
             run_id: "r1".to_string(),
@@ -446,5 +793,228 @@ mod tests {
         }];
         let out = advance_tick(state, control, vec![]);
         assert_eq!(out.primary_master_worker_id.as_deref(), Some("w9"));
+    }
+
+    #[test]
+    fn delivery_status_tracks_control_transition_source() {
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 1,
+            paused: false,
+            workers: vec![worker("master", WorkerRole::MasterPrimary)],
+        };
+        let out = advance_tick(
+            state,
+            vec![ControlMessage {
+                id: "m1".to_string(),
+                seq: 1,
+                mode: MessageMode::Interrupt,
+                from: "dashboard".to_string(),
+                to: None,
+                body: None,
+                action: Some(ControlAction::PauseRun),
+            }],
+            vec![],
+        );
+        assert_eq!(out.control_delivery_status("m1"), DeliveryStatus::Applied);
+        assert_eq!(
+            out.control_delivery_status("missing"),
+            DeliveryStatus::Ignored
+        );
+    }
+
+    #[test]
+    fn idempotent_controls_are_recorded_as_applied() {
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 5,
+            paused: true,
+            workers: vec![worker("master", WorkerRole::MasterDebug)],
+        };
+        let out = advance_tick(
+            state,
+            vec![
+                ControlMessage {
+                    id: "pause_noop".to_string(),
+                    seq: 1,
+                    mode: MessageMode::Interrupt,
+                    from: "dashboard".to_string(),
+                    to: None,
+                    body: None,
+                    action: Some(ControlAction::PauseRun),
+                },
+                ControlMessage {
+                    id: "promote_noop".to_string(),
+                    seq: 2,
+                    mode: MessageMode::Interrupt,
+                    from: "dashboard".to_string(),
+                    to: Some("master".to_string()),
+                    body: None,
+                    action: Some(ControlAction::PromoteToMasterDebug {
+                        worker_id: "master".to_string(),
+                    }),
+                },
+            ],
+            vec![],
+        );
+        assert_eq!(
+            out.control_delivery_status("pause_noop"),
+            DeliveryStatus::Applied
+        );
+        assert_eq!(
+            out.control_delivery_status("promote_noop"),
+            DeliveryStatus::Applied
+        );
+    }
+
+    #[test]
+    fn control_rejects_unknown_worker_target() {
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 1,
+            paused: false,
+            workers: vec![worker("master", WorkerRole::MasterPrimary)],
+        };
+        let out = advance_tick(
+            state,
+            vec![ControlMessage {
+                id: "missing-worker".to_string(),
+                seq: 1,
+                mode: MessageMode::Interrupt,
+                from: "dashboard".to_string(),
+                to: Some("ghost".to_string()),
+                body: None,
+                action: Some(ControlAction::PromoteToMasterDebug {
+                    worker_id: "ghost".to_string(),
+                }),
+            }],
+            vec![],
+        );
+        assert_eq!(
+            out.control_delivery_status("missing-worker"),
+            DeliveryStatus::Rejected
+        );
+        assert_eq!(
+            out.control_rejection_reason("missing-worker"),
+            Some("unknown_worker")
+        );
+    }
+
+    #[test]
+    fn control_rejects_target_mismatch() {
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 1,
+            paused: false,
+            workers: vec![worker("w1", WorkerRole::Slave)],
+        };
+        let out = advance_tick(
+            state,
+            vec![ControlMessage {
+                id: "target-mismatch".to_string(),
+                seq: 1,
+                mode: MessageMode::Interrupt,
+                from: "dashboard".to_string(),
+                to: Some("w1".to_string()),
+                body: None,
+                action: Some(ControlAction::PromoteToMasterDebug {
+                    worker_id: "w2".to_string(),
+                }),
+            }],
+            vec![],
+        );
+        assert_eq!(
+            out.control_delivery_status("target-mismatch"),
+            DeliveryStatus::Rejected
+        );
+        assert_eq!(
+            out.control_rejection_reason("target-mismatch"),
+            Some("target_mismatch")
+        );
+    }
+
+    #[test]
+    fn primary_master_wins_duplicate_intent_idempotency_conflicts() {
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 1,
+            paused: false,
+            workers: vec![
+                worker("primary", WorkerRole::MasterPrimary),
+                worker("debug", WorkerRole::MasterDebug),
+            ],
+        };
+        let intents = vec![
+            ProposedIntent {
+                idempotency_key: "dup-key".to_string(),
+                from_worker_id: "debug".to_string(),
+                kind: IntentKind::PlanTasks,
+                detail: serde_json::json!({"source":"debug"}),
+            },
+            ProposedIntent {
+                idempotency_key: "dup-key".to_string(),
+                from_worker_id: "primary".to_string(),
+                kind: IntentKind::PlanTasks,
+                detail: serde_json::json!({"source":"primary"}),
+            },
+        ];
+        let out = advance_tick(state, vec![], intents);
+        assert_eq!(out.accepted_intents.len(), 1);
+        assert_eq!(out.accepted_intents[0].from_worker_id, "primary");
+        assert_eq!(out.rejected_intents.len(), 1);
+        assert_eq!(out.rejected_intents[0].reason, "duplicate_idempotency_key");
+    }
+
+    #[test]
+    fn queue_message_without_action_is_applied() {
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 1,
+            paused: false,
+            workers: vec![worker("master", WorkerRole::MasterPrimary)],
+        };
+        let out = advance_tick(
+            state,
+            vec![ControlMessage {
+                id: "q1".to_string(),
+                seq: 1,
+                mode: MessageMode::Queue,
+                from: "operator".to_string(),
+                to: None,
+                body: Some("non-interrupting hint".to_string()),
+                action: None,
+            }],
+            vec![],
+        );
+        assert_eq!(out.control_delivery_status("q1"), DeliveryStatus::Applied);
+        assert_eq!(out.control_rejection_reason("q1"), None);
+    }
+
+    #[test]
+    fn interrupt_message_without_action_is_rejected() {
+        let state = TickState {
+            run_id: "r1".to_string(),
+            tick_id: 1,
+            paused: false,
+            workers: vec![worker("master", WorkerRole::MasterPrimary)],
+        };
+        let out = advance_tick(
+            state,
+            vec![ControlMessage {
+                id: "i1".to_string(),
+                seq: 1,
+                mode: MessageMode::Interrupt,
+                from: "operator".to_string(),
+                to: None,
+                body: Some("stop now".to_string()),
+                action: None,
+            }],
+            vec![],
+        );
+        assert_eq!(out.control_delivery_status("i1"), DeliveryStatus::Rejected);
+        assert_eq!(
+            out.control_rejection_reason("i1"),
+            Some("interrupt_requires_action")
+        );
     }
 }

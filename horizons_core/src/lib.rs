@@ -15,6 +15,7 @@ pub mod onboard;
 #[cfg(feature = "optimization")]
 pub mod optimization;
 pub mod pipelines;
+pub use engine::actor_runtime_contract as runtime_contract;
 
 pub use context_refresh::models::{
     ContextEntity, CronSchedule, EventTriggerConfig, RefreshRun, RefreshRunQuery, RefreshRunStatus,

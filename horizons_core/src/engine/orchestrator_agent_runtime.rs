@@ -15,16 +15,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-fn scripted_agent_mode_enabled() -> bool {
-    std::env::var("SMR_SCRIPTED_AGENT_MODE")
-        .ok()
-        .map(|v| {
-            let n = v.trim().to_ascii_lowercase();
-            matches!(n.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
-}
-
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -149,15 +139,10 @@ impl OrchestratorAgentRuntime {
         instruction: &str,
         trigger: serde_json::Value,
     ) -> Option<Result<(SandboxResult, crate::engine::models::SandboxHandle)>> {
-        self.run_with_tags(instruction, trigger, HashMap::new())
-            .await
+        self.run_with_tags(instruction, trigger, HashMap::new()).await
     }
 
-    /// Run the orchestrator agent with structured log tags that will be attached
-    /// to sandbox universal events when teeing to sinks (e.g. VictoriaLogs).
-    ///
-    /// This is the preferred entry point for embedding runtimes (SMR, SB, etc.)
-    /// that need correlation fields like `run_id`, `project_id`, etc.
+    /// Run the orchestrator agent with structured log tags attached to sandbox events.
     pub async fn run_with_tags(
         &self,
         instruction: &str,
@@ -241,52 +226,6 @@ impl OrchestratorAgentRuntime {
             "orchestrator container provisioned"
         );
 
-        // Scripted deterministic mode:
-        // keep real sandbox provisioning/health/release, but skip external agent/LLM calls.
-        if scripted_agent_mode_enabled() {
-            let ready = self.sandbox.backend().wait_ready(&handle).await;
-            if let Err(e) = ready {
-                tracing::error!(%run_id, err = ?e, "scripted mode wait_ready failed");
-                let _ = self.sandbox.backend().release(&handle).await;
-                self.mcp_server.revoke_session(&mcp_token).await;
-                *self.running.lock().await = None;
-                return Some(Err(e));
-            }
-
-            let mut sandbox_result = SandboxResult {
-                events: vec![
-                    serde_json::json!({
-                        "type": "session.created",
-                        "data": { "mode": "scripted_agent" },
-                    }),
-                    serde_json::json!({
-                        "type": "turn.completed",
-                        "data": { "mode": "scripted_agent", "completed": true },
-                    }),
-                ],
-                completed: true,
-                duration_seconds: start.elapsed().as_secs_f64(),
-                final_output: Some("scripted_agent_mode".to_string()),
-                error: None,
-            };
-
-            if let Err(e) = self.sandbox.backend().release(&handle).await {
-                tracing::warn!(%run_id, %e, "failed to release orchestrator container in scripted mode");
-            }
-
-            self.mcp_server.revoke_session(&mcp_token).await;
-            *self.running.lock().await = None;
-
-            sandbox_result.duration_seconds = start.elapsed().as_secs_f64();
-            tracing::info!(
-                %run_id,
-                completed = sandbox_result.completed,
-                duration = sandbox_result.duration_seconds,
-                "orchestrator scripted run finished"
-            );
-            return Some(Ok((sandbox_result, handle)));
-        }
-
         // ── Run the agent session (blocking) ─────────────────────────────
         let result = self
             .sandbox
@@ -345,22 +284,20 @@ impl OrchestratorAgentRuntime {
     fn build_setup_script(&self, mcp_token: &str) -> String {
         let mcp_host_url = &self.config.mcp_host_url;
         let mcp_namespace = &self.config.mcp_namespace;
-        // If the URL already has a scheme (e.g. https://…trycloudflare.com), use as-is;
-        // otherwise prepend http:// (legacy host:port format like host.docker.internal:8081).
         let mcp_base =
             if mcp_host_url.starts_with("http://") || mcp_host_url.starts_with("https://") {
-                mcp_host_url.trim_end_matches('/').to_string()
+                mcp_host_url.clone()
             } else {
                 format!("http://{mcp_host_url}")
             };
 
         let mut lines = Vec::new();
 
-        // Write agent-specific MCP config so the agent can reach our tool server.
+        // Write agent-specific MCP config so the sandboxed agent can reach our tool server.
         match self.config.agent {
             AgentKind::Claude => {
-                // Claude Code reads permissions from ~/.claude/settings.json
-                // and MCP servers from .mcp.json in the working directory.
+                // Claude Code reads permissions from ~/.claude/settings.json and MCP
+                // server definitions from .mcp.json in the working directory.
                 lines.push("mkdir -p /root/.claude".to_string());
                 lines.push(format!(
                     r#"cat > /root/.claude/settings.json << 'SETTINGS'
@@ -373,7 +310,6 @@ impl OrchestratorAgentRuntime {
 SETTINGS"#,
                     mcp_namespace,
                 ));
-                // MCP server config in the workdir (where Claude Code runs).
                 lines.push("mkdir -p /workspace".to_string());
                 lines.push(format!(
                     r#"cat > /workspace/.mcp.json << 'MCPJSON'
