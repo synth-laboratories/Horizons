@@ -139,7 +139,8 @@ impl OrchestratorAgentRuntime {
         instruction: &str,
         trigger: serde_json::Value,
     ) -> Option<Result<(SandboxResult, crate::engine::models::SandboxHandle)>> {
-        self.run_with_tags(instruction, trigger, HashMap::new()).await
+        self.run_with_tags(instruction, trigger, HashMap::new())
+            .await
     }
 
     /// Run the orchestrator agent with structured log tags attached to sandbox events.
@@ -185,6 +186,7 @@ impl OrchestratorAgentRuntime {
             image: self.config.image.clone(),
             env_vars,
             timeout_seconds: self.config.timeout_seconds,
+            no_progress_timeout_seconds: 180,
             workdir: Some("/workspace".to_string()),
             docker_socket: false,
             restart_policy: None,
@@ -330,12 +332,22 @@ MCPJSON"#,
             _ => {
                 // Codex reads MCP config from ~/.codex/config.toml.
                 lines.push("mkdir -p /root/.codex".to_string());
+                // Set chatgpt_base_url in config.toml so LLM calls route through
+                // the cache proxy even if OPENAI_BASE_URL env var is ignored.
+                let chatgpt_base_url_line = self
+                    .config
+                    .env_vars
+                    .get("OPENAI_BASE_URL")
+                    .filter(|v| !v.is_empty())
+                    .map(|v| format!("chatgpt_base_url = \"{v}\"\n"))
+                    .unwrap_or_default();
                 lines.push(format!(
                     r#"cat > /root/.codex/config.toml << 'TOML'
-[mcp_servers.{mcp_namespace}]
+{chatgpt_base_url_line}[mcp_servers.{mcp_namespace}]
 enabled = true
 url = "{mcp_base}/mcp/{mcp_namespace}"
 bearer_token_env_var = "ORCHESTRATOR_MCP_TOKEN"
+tool_timeout_sec = 300
 TOML"#,
                 ));
             }
@@ -345,6 +357,36 @@ TOML"#,
         for line in &self.config.extra_setup_lines {
             lines.push(line.clone());
         }
+
+        // Persist critical env vars into /tmp/smr_runtime_env.sh so the
+        // sandbox-agent process (started in a separate Daytona exec call)
+        // inherits them. The Daytona `env` field at sandbox creation may not
+        // propagate to toolbox `process/execute` commands, so we need this
+        // explicit persistence — mirroring what agent_context.rs does for
+        // worker sandboxes.
+        let persist_keys = [
+            "OPENAI_BASE_URL",
+            "ANTHROPIC_API_KEY",
+        ];
+        let mut env_exports = Vec::new();
+        // ORCHESTRATOR_MCP_TOKEN is not yet in self.config.env_vars (added
+        // in run_with_tags after this method returns), but it's available as
+        // the mcp_token parameter.
+        env_exports.push(format!("export ORCHESTRATOR_MCP_TOKEN=\"{mcp_token}\""));
+        for key in &persist_keys {
+            if let Some(val) = self.config.env_vars.get(*key) {
+                if !val.is_empty() {
+                    env_exports.push(format!("export {key}=\"{val}\""));
+                }
+            }
+        }
+        let env_block = env_exports.join("\n");
+        lines.push(format!(
+            "cat > /tmp/smr_runtime_env.sh << 'SMR_RUNTIME_ENV_EOF'\n\
+             {env_block}\n\
+             SMR_RUNTIME_ENV_EOF\n\
+             chmod 0644 /tmp/smr_runtime_env.sh"
+        ));
 
         lines.join("\n")
     }

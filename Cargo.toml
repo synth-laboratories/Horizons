@@ -6,7 +6,6 @@ members = [
   "horizons_server",
   "horizons_integrations",
   "horizons_graph",
-  "voyager",
   "mipro_v2",
   "rlm",
 ]

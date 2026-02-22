@@ -158,6 +158,13 @@ pub struct SessionListResponse {
     pub sessions: Vec<SessionListEntry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLiveness {
+    Active,
+    Ended,
+    Missing,
+}
+
 // ---------------------------------------------------------------------------
 // Legacy types (kept for backward compat with existing code)
 // ---------------------------------------------------------------------------
@@ -569,10 +576,9 @@ impl SandboxAgentClient {
 
     /// Check whether a session has ended via the REST API.
     ///
-    /// `GET /v1/sessions` → find session by ID → return `ended` bool.
-    /// Returns `Ok(false)` if the session is not found (defensive).
+    /// `GET /v1/sessions` → find session by ID.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn is_session_ended(&self, session_id: &str) -> Result<bool> {
+    pub async fn session_liveness(&self, session_id: &str) -> Result<SessionLiveness> {
         let req = self.apply_auth(self.http.get(self.url("/v1/sessions")));
         let resp = req.send().await.map_err(Error::backend_reqwest)?;
         if !resp.status().is_success() {
@@ -585,12 +591,24 @@ impl SandboxAgentClient {
             .json()
             .await
             .map_err(|e| Error::BackendMessage(format!("GET /v1/sessions: bad response: {e}")))?;
-        Ok(list
+        Ok(match list
             .sessions
             .iter()
             .find(|s| s.session_id == session_id)
             .map(|s| s.ended)
-            .unwrap_or(false))
+        {
+            Some(true) => SessionLiveness::Ended,
+            Some(false) => SessionLiveness::Active,
+            None => SessionLiveness::Missing,
+        })
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn is_session_ended(&self, session_id: &str) -> Result<bool> {
+        Ok(matches!(
+            self.session_liveness(session_id).await?,
+            SessionLiveness::Ended
+        ))
     }
 }
 

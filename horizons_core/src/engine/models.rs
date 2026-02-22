@@ -84,6 +84,13 @@ pub struct SandboxConfig {
     pub env_vars: HashMap<String, String>,
     /// Maximum seconds the agent session may run before timeout.
     pub timeout_seconds: u64,
+    /// Maximum seconds without any observed progress before failing fast.
+    ///
+    /// Progress is defined as receiving at least one SSE event from sandbox-agent.
+    /// This guards against silent hangs where the session never reaches a terminal
+    /// event but also makes no forward progress.
+    #[serde(default = "default_no_progress_timeout_seconds")]
+    pub no_progress_timeout_seconds: u64,
     /// Working directory inside the container where task files reside.
     pub workdir: Option<String>,
 
@@ -123,12 +130,17 @@ impl Default for SandboxConfig {
             image: None,
             env_vars: HashMap::new(),
             timeout_seconds: 1800,
+            no_progress_timeout_seconds: default_no_progress_timeout_seconds(),
             workdir: None,
             docker_socket: false,
             restart_policy: None,
             log_tags: HashMap::new(),
         }
     }
+}
+
+fn default_no_progress_timeout_seconds() -> u64 {
+    180
 }
 
 /// Opaque handle to a provisioned sandbox.

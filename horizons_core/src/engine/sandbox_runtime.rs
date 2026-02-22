@@ -7,7 +7,7 @@
 use crate::engine::models::{
     AgentKind, PermissionMode, SandboxConfig, SandboxHandle, SandboxResult,
 };
-use crate::engine::sandbox_agent_client::SandboxAgentClient;
+use crate::engine::sandbox_agent_client::{SandboxAgentClient, SessionLiveness};
 use crate::engine::traits::SandboxBackend;
 use crate::engine::victoria_logs::{VictoriaLogsEmitter, VictoriaSessionCtx};
 use crate::{Error, Result};
@@ -34,8 +34,15 @@ fn scripted_agent_mode_enabled() -> bool {
 /// The caller receives the SSE event stream and a one-shot completion signal.
 pub struct StartAgentChannels {
     pub events_rx: tokio::sync::mpsc::Receiver<serde_json::Value>,
-    pub completion_rx: tokio::sync::oneshot::Receiver<bool>,
+    pub completion_rx: tokio::sync::oneshot::Receiver<SessionTerminalSignal>,
     pub sse_task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTerminalSignal {
+    Completed,
+    Failed { reason: String },
+    Aborted { reason: String },
 }
 
 /// Snapshot of a long-running sandbox agent run started via `start_agent_tracked`.
@@ -203,7 +210,8 @@ impl SandboxRuntime {
         // 5. Start SSE event reader with completion channel.
         let bypass_perms = config.permission_mode == PermissionMode::Bypass;
         let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(256);
-        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<bool>();
+        let (completion_tx, completion_rx) =
+            tokio::sync::oneshot::channel::<SessionTerminalSignal>();
         let client_sse = client.clone();
         let sid_sse = session_id.clone();
         let victoria = self.victoria.clone();
@@ -249,32 +257,136 @@ impl SandboxRuntime {
         // blocks on `events_tx.send().await` and never signals completion —
         // causing a deadlock. Draining here prevents that.
         let timeout = Duration::from_secs(config.timeout_seconds);
+        let no_progress_timeout = Duration::from_secs(config.no_progress_timeout_seconds.max(1));
         let mut output_buf: Option<String> = None;
         let mut all_events = Vec::new();
         let sleep = tokio::time::sleep(timeout);
+        let no_progress_sleep = tokio::time::sleep(no_progress_timeout);
         tokio::pin!(sleep);
+        tokio::pin!(no_progress_sleep);
         tokio::pin!(completion_rx);
 
         let mut completed = false;
         let mut error_msg: Option<String> = None;
 
+        tracing::info!(
+            session_timeout_seconds = config.timeout_seconds,
+            no_progress_timeout_seconds = config.no_progress_timeout_seconds.max(1),
+            "runtime.phase.entered: awaiting_terminal_signal"
+        );
+        Self::emit_runtime_status_event(
+            self.victoria.as_ref(),
+            victoria_ctx.as_ref(),
+            "runtime.phase.entered",
+            serde_json::json!({
+                "phase": "awaiting_terminal_signal",
+                "session_timeout_seconds": config.timeout_seconds,
+                "no_progress_timeout_seconds": config.no_progress_timeout_seconds.max(1),
+            }),
+        );
+
         loop {
             tokio::select! {
                 result = &mut completion_rx => {
                     match result {
-                        Ok(true) => { completed = true; }
-                        Ok(false) => { error_msg = Some("session ended with error".to_string()); }
-                        Err(_) => { error_msg = Some("SSE reader dropped completion channel".to_string()); }
+                        Ok(SessionTerminalSignal::Completed) => {
+                            completed = true;
+                            tracing::info!("runtime.terminal: completed");
+                            Self::emit_runtime_status_event(
+                                self.victoria.as_ref(),
+                                victoria_ctx.as_ref(),
+                                "runtime.terminal",
+                                serde_json::json!({
+                                    "status": "completed",
+                                    "reason_code": "session_completed",
+                                }),
+                            );
+                        }
+                        Ok(SessionTerminalSignal::Failed { reason }) => {
+                            error_msg = Some(format!("session failed: {reason}"));
+                            tracing::warn!(reason = %reason, "runtime.terminal: failed");
+                            Self::emit_runtime_status_event(
+                                self.victoria.as_ref(),
+                                victoria_ctx.as_ref(),
+                                "runtime.terminal",
+                                serde_json::json!({
+                                    "status": "failed",
+                                    "reason_code": "session_failed",
+                                    "reason": reason,
+                                }),
+                            );
+                        }
+                        Ok(SessionTerminalSignal::Aborted { reason }) => {
+                            error_msg = Some(format!("session aborted: {reason}"));
+                            tracing::warn!(reason = %reason, "runtime.terminal: aborted");
+                            Self::emit_runtime_status_event(
+                                self.victoria.as_ref(),
+                                victoria_ctx.as_ref(),
+                                "runtime.terminal",
+                                serde_json::json!({
+                                    "status": "aborted",
+                                    "reason_code": "session_aborted",
+                                    "reason": reason,
+                                }),
+                            );
+                        }
+                        Err(_) => {
+                            error_msg = Some("session terminal channel dropped".to_string());
+                            tracing::warn!("runtime.terminal: channel_dropped");
+                            Self::emit_runtime_status_event(
+                                self.victoria.as_ref(),
+                                victoria_ctx.as_ref(),
+                                "runtime.terminal",
+                                serde_json::json!({
+                                    "status": "aborted",
+                                    "reason_code": "terminal_channel_dropped",
+                                }),
+                            );
+                        }
                     }
                     break;
                 }
                 Some(event) = events_rx.recv() => {
                     Self::extract_output_from_universal(&event, &mut output_buf);
                     all_events.push(event);
+                    no_progress_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + no_progress_timeout);
+                }
+                _ = &mut no_progress_sleep => {
+                    tracing::error!(
+                        no_progress_timeout_seconds = config.no_progress_timeout_seconds.max(1),
+                        "runtime.phase.stalled: no progress while awaiting terminal signal"
+                    );
+                    error_msg = Some(format!(
+                        "no_progress_timeout after {}s",
+                        config.no_progress_timeout_seconds.max(1)
+                    ));
+                    Self::emit_runtime_status_event(
+                        self.victoria.as_ref(),
+                        victoria_ctx.as_ref(),
+                        "runtime.phase.stalled",
+                        serde_json::json!({
+                            "phase": "awaiting_terminal_signal",
+                            "reason_code": "no_progress_timeout",
+                            "no_progress_timeout_seconds": config.no_progress_timeout_seconds.max(1),
+                        }),
+                    );
+                    break;
                 }
                 _ = &mut sleep => {
                     tracing::warn!("session timed out");
                     error_msg = Some("session timed out".to_string());
+                    Self::emit_runtime_status_event(
+                        self.victoria.as_ref(),
+                        victoria_ctx.as_ref(),
+                        "runtime.terminal",
+                        serde_json::json!({
+                            "status": "failed",
+                            "reason_code": "session_timeout",
+                            "session_timeout_seconds": config.timeout_seconds,
+                        }),
+                    );
                     break;
                 }
             }
@@ -323,7 +435,7 @@ impl SandboxRuntime {
         session_id: &str,
         bypass_permissions: bool,
         events_tx: tokio::sync::mpsc::Sender<serde_json::Value>,
-        completion_tx: Option<tokio::sync::oneshot::Sender<bool>>,
+        completion_tx: Option<tokio::sync::oneshot::Sender<SessionTerminalSignal>>,
         complete_on_turn: bool,
         last_sse_epoch_ms: Option<Arc<AtomicI64>>,
         victoria: Option<VictoriaLogsEmitter>,
@@ -334,7 +446,9 @@ impl SandboxRuntime {
             Err(e) => {
                 tracing::warn!(%e, "SSE connect failed, permissions may not be handled");
                 if let Some(tx) = completion_tx {
-                    let _ = tx.send(false);
+                    let _ = tx.send(SessionTerminalSignal::Aborted {
+                        reason: "sse_connect_failed".to_string(),
+                    });
                 }
                 return;
             }
@@ -353,23 +467,42 @@ impl SandboxRuntime {
                 Err(_timeout) => {
                     // SSE idle timeout — check session status via REST fallback.
                     tracing::info!("SSE idle timeout after 120s, checking session status via REST");
-                    match client.is_session_ended(session_id).await {
-                        Ok(true) => {
+                    match client.session_liveness(session_id).await {
+                        Ok(SessionLiveness::Ended) => {
                             tracing::info!("SSE idle timeout: session ended (confirmed via REST)");
                             if let Some(tx) = completion_tx.take() {
-                                let _ = tx.send(true);
+                                let _ = tx.send(SessionTerminalSignal::Completed);
                             }
                             return;
                         }
-                        Ok(false) => {
+                        Ok(SessionLiveness::Active) => {
                             tracing::debug!(
                                 "SSE idle timeout: session still active per REST, continuing"
                             );
                             continue;
                         }
+                        Ok(SessionLiveness::Missing) => {
+                            tracing::warn!(
+                                "SSE idle timeout: session missing via REST, treating as aborted"
+                            );
+                            if let Some(tx) = completion_tx.take() {
+                                let _ = tx.send(SessionTerminalSignal::Aborted {
+                                    reason: "session_missing".to_string(),
+                                });
+                            }
+                            return;
+                        }
                         Err(e) => {
-                            tracing::warn!(%e, "SSE idle timeout: REST session check failed, treating as disconnected");
-                            break;
+                            tracing::warn!(
+                                %e,
+                                "runtime.dependency.unreachable: REST session check failed during SSE idle timeout"
+                            );
+                            if let Some(tx) = completion_tx.take() {
+                                let _ = tx.send(SessionTerminalSignal::Aborted {
+                                    reason: "rest_session_check_failed".to_string(),
+                                });
+                            }
+                            return;
                         }
                     }
                 }
@@ -441,7 +574,7 @@ impl SandboxRuntime {
                     if event_type == "session.ended" {
                         tracing::info!(%event_type, "session.ended event received");
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(true);
+                            let _ = tx.send(SessionTerminalSignal::Completed);
                         }
                     }
 
@@ -450,7 +583,7 @@ impl SandboxRuntime {
                         tracing::info!(%event_type, %complete_on_turn, "turn.completed event received");
                         if complete_on_turn {
                             if let Some(tx) = completion_tx.take() {
-                                let _ = tx.send(true);
+                                let _ = tx.send(SessionTerminalSignal::Completed);
                             }
                         }
                     }
@@ -480,7 +613,13 @@ impl SandboxRuntime {
                                             }
                                             if complete_on_turn {
                                                 if let Some(tx) = completion_tx.take() {
-                                                    let _ = tx.send(!failed);
+                                                    if failed {
+                                                        let _ = tx.send(SessionTerminalSignal::Failed {
+                                                            reason: "turn_completed_failed".to_string(),
+                                                        });
+                                                    } else {
+                                                        let _ = tx.send(SessionTerminalSignal::Completed);
+                                                    }
                                                 }
                                             }
                                         }
@@ -499,7 +638,9 @@ impl SandboxRuntime {
                             .unwrap_or("unknown error");
                         tracing::warn!(%msg, "error event received");
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(false);
+                            let _ = tx.send(SessionTerminalSignal::Failed {
+                                reason: msg.to_string(),
+                            });
                         }
                     }
 
@@ -522,7 +663,25 @@ impl SandboxRuntime {
 
         // Stream ended without explicit session.ended.
         if let Some(tx) = completion_tx {
-            let _ = tx.send(false);
+            let _ = tx.send(SessionTerminalSignal::Aborted {
+                reason: "sse_stream_closed_without_terminal_event".to_string(),
+            });
+        }
+    }
+
+    fn emit_runtime_status_event(
+        victoria: Option<&VictoriaLogsEmitter>,
+        ctx: Option<&VictoriaSessionCtx>,
+        event_type: &str,
+        data: serde_json::Value,
+    ) {
+        if let (Some(v), Some(c)) = (victoria, ctx) {
+            let event = serde_json::json!({
+                "type": event_type,
+                "data": data,
+                "time": chrono::Utc::now().to_rfc3339(),
+            });
+            v.enqueue_event(c, u64::MAX - 1, &event);
         }
     }
 
@@ -627,7 +786,8 @@ impl SandboxRuntime {
         // Start SSE reader with completion channel.
         let bypass_perms = config.permission_mode == PermissionMode::Bypass;
         let (events_tx, events_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(256);
-        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<bool>();
+        let (completion_tx, completion_rx) =
+            tokio::sync::oneshot::channel::<SessionTerminalSignal>();
         let last_sse_epoch_ms = Arc::new(AtomicI64::new(0));
         let last_sse_clone = last_sse_epoch_ms.clone();
         let client_sse = client.clone();

@@ -34,7 +34,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
 ulid = "1.2.1"
 uuid = { version = "1.15.1", features = ["serde", "v4"] }
-voyager = { path = "../voyager", optional = true }
+voyager = { path = "../../rust_backend/voyager", optional = true }
 leptos = { version = "0.6.15", default-features = false, features = ["ssr"] }
 utoipa = "5.4.0"
 

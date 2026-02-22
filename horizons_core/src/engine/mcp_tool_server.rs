@@ -16,6 +16,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+fn parse_bearer_token(auth_header: &str) -> Option<&str> {
+    let trimmed = auth_header.trim();
+    let (scheme, token) = trimmed.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -311,9 +324,7 @@ impl McpToolServer {
     // -----------------------------------------------------------------------
 
     async fn check_auth(&self, auth_header: Option<&str>) -> Result<(), McpResponse> {
-        let token = auth_header
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .map(|t| t.trim());
+        let token = auth_header.and_then(parse_bearer_token);
 
         let Some(token) = token else {
             return Err(McpResponse {
@@ -411,5 +422,24 @@ impl McpToolServer {
 impl Default for McpToolServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bearer_token;
+
+    #[test]
+    fn parse_bearer_token_accepts_case_insensitive_scheme() {
+        assert_eq!(parse_bearer_token("Bearer token-a"), Some("token-a"));
+        assert_eq!(parse_bearer_token("bearer token-b"), Some("token-b"));
+        assert_eq!(parse_bearer_token("BEARER token-c"), Some("token-c"));
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_invalid_headers() {
+        assert_eq!(parse_bearer_token("Basic token"), None);
+        assert_eq!(parse_bearer_token("Bearer "), None);
+        assert_eq!(parse_bearer_token(""), None);
     }
 }

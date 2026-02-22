@@ -123,6 +123,7 @@ impl SandboxedAgent {
             image: self.image.clone(),
             env_vars,
             timeout_seconds: self.timeout_seconds,
+            no_progress_timeout_seconds: 180,
             workdir: self.workdir.clone(),
             docker_socket: false,
             restart_policy: None,

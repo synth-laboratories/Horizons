@@ -688,7 +688,8 @@ mod tests {
         let out = advance_tick(state, vec![], vec![]);
         assert_eq!(out.primary_master_worker_id.as_deref(), Some("w1"));
         assert!(out.transitions.iter().any(|t| {
-            t.kind == TransitionKind::DemotedStalePrimaryMaster && t.worker_id.as_deref() == Some("w2")
+            t.kind == TransitionKind::DemotedStalePrimaryMaster
+                && t.worker_id.as_deref() == Some("w2")
         }));
     }
 

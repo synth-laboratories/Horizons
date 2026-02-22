@@ -75,7 +75,8 @@ impl VictoriaLogsEmitter {
         let base = env_nonempty("HORIZONS_VICTORIA_LOGS_URL")
             .or_else(|| env_nonempty("SMR_VICTORIA_LOGS_URL"))
             .or_else(|| env_nonempty("SYNTH_VICTORIA_LOGS_URL"))
-            .or_else(|| env_nonempty("VICTORIA_LOGS_URL"))?;
+            .or_else(|| env_nonempty("VICTORIA_LOGS_URL"))
+            .or_else(default_local_victoria_base)?;
 
         let mode = match env_nonempty("HORIZONS_VICTORIA_LOGS_MODE")
             .or_else(|| env_nonempty("SMR_VICTORIA_LOGS_MODE"))
@@ -244,6 +245,40 @@ impl VictoriaLogsEmitter {
         });
         self.enqueue_event(ctx, u64::MAX, &record);
     }
+}
+
+fn default_local_victoria_base() -> Option<String> {
+    let deployment_env = env_nonempty("SMR_DEPLOYMENT_ENV")
+        .or_else(|| env_nonempty("SYNTH_DEPLOYMENT_ENV"))
+        .or_else(|| env_nonempty("DEPLOYMENT_ENV"))
+        .unwrap_or_else(|| "local".to_string())
+        .to_ascii_lowercase();
+    let cp_url = env_nonempty("SMR_CONTROL_PLANE_URL")
+        .or_else(|| env_nonempty("SYNTH_BACKEND_URL"))
+        .or_else(|| env_nonempty("BACKEND_URL"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let force_local = env_nonempty("SMR_VICTORIA_LOGS_LOCAL_DEFAULT")
+        .map(|v| {
+            matches!(
+                v.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    let is_local = deployment_env == "local"
+        || cp_url.contains("localhost")
+        || cp_url.contains("127.0.0.1")
+        || force_local;
+    if !is_local {
+        return None;
+    }
+    let base = "http://127.0.0.1:9428".to_string();
+    tracing::info!(
+        url = %base,
+        "horizons victoria logs URL not set; using local default"
+    );
+    Some(base)
 }
 
 async fn ingest_batch(

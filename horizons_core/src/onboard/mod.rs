@@ -1,5 +1,4 @@
 pub mod config;
-pub mod helix_client;
 pub mod models;
 pub mod postgres;
 pub mod postgres_project_db;
