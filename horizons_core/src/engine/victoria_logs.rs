@@ -259,12 +259,7 @@ fn default_local_victoria_base() -> Option<String> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let force_local = env_nonempty("SMR_VICTORIA_LOGS_LOCAL_DEFAULT")
-        .map(|v| {
-            matches!(
-                v.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
     let is_local = deployment_env == "local"
         || cp_url.contains("localhost")

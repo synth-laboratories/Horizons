@@ -68,6 +68,110 @@ struct RunningState {
     host_port: Option<u16>,
 }
 
+/// Cleanup guard that makes orchestrator runs cancellation-safe.
+///
+/// If the run future is dropped (for example by an external timeout), `Drop`
+/// schedules best-effort async cleanup to:
+/// 1. release the sandbox handle (if provisioned),
+/// 2. revoke the MCP session token,
+/// 3. clear the singleton `running` flag.
+struct RunCleanupGuard {
+    run_id: String,
+    running: Arc<Mutex<Option<RunningState>>>,
+    sandbox: Option<Arc<SandboxRuntime>>,
+    mcp_server: Option<McpToolServer>,
+    mcp_token: Option<String>,
+    handle: Option<crate::engine::models::SandboxHandle>,
+    disarmed: bool,
+}
+
+impl RunCleanupGuard {
+    fn new(
+        run_id: String,
+        running: Arc<Mutex<Option<RunningState>>>,
+        sandbox: Arc<SandboxRuntime>,
+        mcp_server: McpToolServer,
+        mcp_token: String,
+    ) -> Self {
+        Self {
+            run_id,
+            running,
+            sandbox: Some(sandbox),
+            mcp_server: Some(mcp_server),
+            mcp_token: Some(mcp_token),
+            handle: None,
+            disarmed: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(run_id: String, running: Arc<Mutex<Option<RunningState>>>) -> Self {
+        Self {
+            run_id,
+            running,
+            sandbox: None,
+            mcp_server: None,
+            mcp_token: None,
+            handle: None,
+            disarmed: false,
+        }
+    }
+
+    fn set_handle(&mut self, handle: crate::engine::models::SandboxHandle) {
+        self.handle = Some(handle);
+    }
+
+    async fn cleanup_now(&mut self) {
+        if self.disarmed {
+            return;
+        }
+
+        if let (Some(sandbox), Some(handle)) = (self.sandbox.as_ref(), self.handle.take()) {
+            if let Err(e) = sandbox.backend().release(&handle).await {
+                tracing::warn!(run_id = %self.run_id, %e, "failed to release orchestrator container");
+            }
+        }
+        if let (Some(mcp_server), Some(token)) = (self.mcp_server.as_ref(), self.mcp_token.take()) {
+            mcp_server.revoke_session(&token).await;
+        }
+        *self.running.lock().await = None;
+        self.disarmed = true;
+    }
+}
+
+impl Drop for RunCleanupGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+
+        let run_id = self.run_id.clone();
+        let running = self.running.clone();
+        let sandbox = self.sandbox.take();
+        let mcp_server = self.mcp_server.take();
+        let mcp_token = self.mcp_token.take();
+        let handle = self.handle.take();
+        self.disarmed = true;
+
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let (Some(sandbox), Some(handle)) = (sandbox.as_ref(), handle) {
+                    if let Err(e) = sandbox.backend().release(&handle).await {
+                        tracing::warn!(run_id = %run_id, %e, "failed to release orchestrator container during drop cleanup");
+                    }
+                }
+                if let (Some(mcp_server), Some(token)) = (mcp_server.as_ref(), mcp_token) {
+                    mcp_server.revoke_session(&token).await;
+                }
+                *running.lock().await = None;
+                tracing::warn!(run_id = %run_id, "orchestrator run cleanup executed from drop");
+            });
+        } else {
+            tracing::warn!(run_id = %run_id, "tokio runtime unavailable; orchestrator drop cleanup could not be scheduled");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
@@ -170,6 +274,13 @@ impl OrchestratorAgentRuntime {
 
         // ── Generate MCP session token ───────────────────────────────────
         let mcp_token = self.mcp_server.create_session(&run_id).await;
+        let mut cleanup_guard = RunCleanupGuard::new(
+            run_id.clone(),
+            self.running.clone(),
+            self.sandbox.clone(),
+            self.mcp_server.clone(),
+            mcp_token.clone(),
+        );
 
         // ── Build SANDBOX_SETUP_SCRIPT ───────────────────────────────────
         let setup_script = self.build_setup_script(&mcp_token);
@@ -206,11 +317,11 @@ impl OrchestratorAgentRuntime {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(%run_id, err = ?e, "failed to provision orchestrator container");
-                self.mcp_server.revoke_session(&mcp_token).await;
-                *self.running.lock().await = None;
+                cleanup_guard.cleanup_now().await;
                 return Some(Err(e));
             }
         };
+        cleanup_guard.set_handle(handle.clone());
 
         // Store container info so status() can report it.
         {
@@ -234,14 +345,8 @@ impl OrchestratorAgentRuntime {
             .run_session_in_sandbox(&handle, &sandbox_config, instruction)
             .await;
 
-        // ── Release container ────────────────────────────────────────────
-        if let Err(e) = self.sandbox.backend().release(&handle).await {
-            tracing::warn!(%run_id, %e, "failed to release orchestrator container");
-        }
-
         // ── Cleanup ──────────────────────────────────────────────────────
-        self.mcp_server.revoke_session(&mcp_token).await;
-        *self.running.lock().await = None;
+        cleanup_guard.cleanup_now().await;
 
         match result {
             Ok(mut sandbox_result) => {
@@ -364,10 +469,7 @@ TOML"#,
         // propagate to toolbox `process/execute` commands, so we need this
         // explicit persistence — mirroring what agent_context.rs does for
         // worker sandboxes.
-        let persist_keys = [
-            "OPENAI_BASE_URL",
-            "ANTHROPIC_API_KEY",
-        ];
+        let persist_keys = ["OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"];
         let mut env_exports = Vec::new();
         // ORCHESTRATOR_MCP_TOKEN is not yet in self.config.env_vars (added
         // in run_with_tags after this method returns), but it's available as
@@ -389,5 +491,44 @@ TOML"#,
         ));
 
         lines.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration, sleep};
+
+    #[tokio::test]
+    async fn run_cleanup_guard_drop_clears_running_state() {
+        let running = Arc::new(Mutex::new(Some(RunningState {
+            started_at: chrono::Utc::now(),
+            trigger: serde_json::json!({"test": true}),
+            run_id: "run_test".to_string(),
+            container_id: None,
+            host_port: None,
+        })));
+
+        {
+            let _guard = RunCleanupGuard::new_for_test("run_test".to_string(), running.clone());
+        }
+
+        sleep(Duration::from_millis(25)).await;
+        assert!(running.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_cleanup_guard_cleanup_now_clears_running_state() {
+        let running = Arc::new(Mutex::new(Some(RunningState {
+            started_at: chrono::Utc::now(),
+            trigger: serde_json::json!({"test": true}),
+            run_id: "run_test".to_string(),
+            container_id: None,
+            host_port: None,
+        })));
+
+        let mut guard = RunCleanupGuard::new_for_test("run_test".to_string(), running.clone());
+        guard.cleanup_now().await;
+        assert!(running.lock().await.is_none());
     }
 }

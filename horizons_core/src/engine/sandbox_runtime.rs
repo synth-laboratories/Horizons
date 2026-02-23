@@ -77,6 +77,162 @@ pub struct SandboxRuntime {
 }
 
 impl SandboxRuntime {
+    fn sse_reconnect_max_attempts() -> u32 {
+        std::env::var("HORIZONS_SSE_RECONNECT_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(4)
+            .max(1)
+    }
+
+    fn sse_reconnect_base_backoff_ms() -> u64 {
+        std::env::var("HORIZONS_SSE_RECONNECT_BASE_BACKOFF_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(500)
+            .max(100)
+    }
+
+    fn sse_dependency_reconnect_max_attempts() -> u32 {
+        std::env::var("HORIZONS_SSE_DEPENDENCY_RECONNECT_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(24)
+            .max(1)
+    }
+
+    fn is_argo_origin_unregistered_error(err_text: &str) -> bool {
+        let lower = err_text.to_ascii_lowercase();
+        lower.contains("origin has been unregistered from argo tunnel")
+            || (lower.contains("events sse connect failed: 530")
+                && lower.contains("argo tunnel"))
+            || (lower.contains("get /v1/sessions failed: 530") && lower.contains("argo tunnel"))
+    }
+
+    fn sse_reconnect_backoff(attempt: u32) -> Duration {
+        let base = Self::sse_reconnect_base_backoff_ms();
+        // 500ms, 1s, 2s, 4s... capped to keep retries responsive.
+        let factor = 1u64.checked_shl(attempt.min(8)).unwrap_or(u64::MAX);
+        Duration::from_millis(base.saturating_mul(factor).min(5_000))
+    }
+
+    async fn maybe_reconnect_or_signal(
+        client: &SandboxAgentClient,
+        session_id: &str,
+        completion_tx: &mut Option<tokio::sync::oneshot::Sender<SessionTerminalSignal>>,
+        consecutive_disconnects: &mut u32,
+        terminal_reason_if_exhausted: &'static str,
+    ) -> bool {
+        if completion_tx.is_none() {
+            return false;
+        }
+
+        let max_attempts = Self::sse_reconnect_max_attempts();
+        match client.session_liveness(session_id).await {
+            Ok(SessionLiveness::Ended) => {
+                tracing::info!("SSE disconnect: session ended (confirmed via REST)");
+                if let Some(tx) = completion_tx.take() {
+                    let _ = tx.send(SessionTerminalSignal::Completed);
+                }
+                false
+            }
+            Ok(SessionLiveness::Missing) => {
+                tracing::warn!("SSE disconnect: session missing via REST, treating as aborted");
+                if let Some(tx) = completion_tx.take() {
+                    let _ = tx.send(SessionTerminalSignal::Aborted {
+                        reason: "session_missing".to_string(),
+                    });
+                }
+                false
+            }
+            Ok(SessionLiveness::Active) => {
+                *consecutive_disconnects = consecutive_disconnects.saturating_add(1);
+                if *consecutive_disconnects > max_attempts {
+                    tracing::warn!(
+                        attempts = *consecutive_disconnects,
+                        max_attempts,
+                        "SSE reconnect attempts exhausted while session still active; aborting"
+                    );
+                    if let Some(tx) = completion_tx.take() {
+                        let _ = tx.send(SessionTerminalSignal::Aborted {
+                            reason: terminal_reason_if_exhausted.to_string(),
+                        });
+                    }
+                    return false;
+                }
+                let backoff = Self::sse_reconnect_backoff(*consecutive_disconnects - 1);
+                tracing::warn!(
+                    attempts = *consecutive_disconnects,
+                    max_attempts,
+                    backoff_ms = backoff.as_millis(),
+                    "SSE disconnected while session active; retrying stream connection"
+                );
+                tokio::time::sleep(backoff).await;
+                true
+            }
+            Err(e) => {
+                let err_text = format!("{e:#}");
+                let is_dependency_unreachable =
+                    Self::is_argo_origin_unregistered_error(&err_text);
+                let allowed_attempts = if is_dependency_unreachable {
+                    Self::sse_dependency_reconnect_max_attempts()
+                } else {
+                    max_attempts
+                };
+                *consecutive_disconnects = consecutive_disconnects.saturating_add(1);
+                if *consecutive_disconnects > allowed_attempts {
+                    if is_dependency_unreachable {
+                        tracing::error!(
+                            %e,
+                            attempts = *consecutive_disconnects,
+                            max_attempts = allowed_attempts,
+                            reason_code = "dependency_unreachable_argo_origin_unregistered",
+                            "SSE reconnect exhausted while upstream tunnel/origin is unreachable; aborting loudly"
+                        );
+                    } else {
+                        tracing::warn!(
+                            %e,
+                            attempts = *consecutive_disconnects,
+                            max_attempts = allowed_attempts,
+                            "REST liveness checks failed while reconnecting SSE; aborting"
+                        );
+                    }
+                    if let Some(tx) = completion_tx.take() {
+                        let _ = tx.send(SessionTerminalSignal::Aborted {
+                            reason: if is_dependency_unreachable {
+                                "dependency_unreachable_argo_origin_unregistered".to_string()
+                            } else {
+                                "rest_session_check_failed".to_string()
+                            },
+                        });
+                    }
+                    return false;
+                }
+                let backoff = Self::sse_reconnect_backoff(*consecutive_disconnects - 1);
+                if is_dependency_unreachable {
+                    tracing::error!(
+                        %e,
+                        attempts = *consecutive_disconnects,
+                        max_attempts = allowed_attempts,
+                        backoff_ms = backoff.as_millis(),
+                        reason_code = "dependency_unreachable_argo_origin_unregistered",
+                        "runtime.dependency.unreachable: tunnel/origin unreachable during SSE reconnect; retrying"
+                    );
+                } else {
+                    tracing::warn!(
+                        %e,
+                        attempts = *consecutive_disconnects,
+                        max_attempts = allowed_attempts,
+                        backoff_ms = backoff.as_millis(),
+                        "REST liveness check failed while reconnecting SSE; retrying"
+                    );
+                }
+                tokio::time::sleep(backoff).await;
+                true
+            }
+        }
+    }
+
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
         Self {
             backend,
@@ -441,185 +597,302 @@ impl SandboxRuntime {
         victoria: Option<VictoriaLogsEmitter>,
         victoria_ctx: Option<VictoriaSessionCtx>,
     ) {
-        let resp = match client.events_sse_connect(session_id).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(%e, "SSE connect failed, permissions may not be handled");
-                if let Some(tx) = completion_tx {
-                    let _ = tx.send(SessionTerminalSignal::Aborted {
-                        reason: "sse_connect_failed".to_string(),
-                    });
-                }
-                return;
-            }
-        };
-
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
         let mut completion_tx = completion_tx;
         let sse_idle_timeout = Duration::from_secs(120);
         let mut seq: u64 = 0;
+        let mut consecutive_disconnects: u32 = 0;
 
-        loop {
-            let chunk = match tokio::time::timeout(sse_idle_timeout, stream.next()).await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break, // stream ended cleanly
-                Err(_timeout) => {
-                    // SSE idle timeout — check session status via REST fallback.
-                    tracing::info!("SSE idle timeout after 120s, checking session status via REST");
-                    match client.session_liveness(session_id).await {
-                        Ok(SessionLiveness::Ended) => {
-                            tracing::info!("SSE idle timeout: session ended (confirmed via REST)");
-                            if let Some(tx) = completion_tx.take() {
-                                let _ = tx.send(SessionTerminalSignal::Completed);
-                            }
-                            return;
-                        }
-                        Ok(SessionLiveness::Active) => {
-                            tracing::debug!(
-                                "SSE idle timeout: session still active per REST, continuing"
-                            );
-                            continue;
-                        }
-                        Ok(SessionLiveness::Missing) => {
-                            tracing::warn!(
-                                "SSE idle timeout: session missing via REST, treating as aborted"
-                            );
-                            if let Some(tx) = completion_tx.take() {
-                                let _ = tx.send(SessionTerminalSignal::Aborted {
-                                    reason: "session_missing".to_string(),
-                                });
-                            }
-                            return;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                %e,
-                                "runtime.dependency.unreachable: REST session check failed during SSE idle timeout"
-                            );
-                            if let Some(tx) = completion_tx.take() {
-                                let _ = tx.send(SessionTerminalSignal::Aborted {
-                                    reason: "rest_session_check_failed".to_string(),
-                                });
-                            }
-                            return;
-                        }
-                    }
-                }
-            };
-
-            let bytes = match chunk {
-                Ok(b) => b,
+        'reconnect: loop {
+            let resp = match client.events_sse_connect(session_id).await {
+                Ok(r) => r,
                 Err(e) => {
-                    tracing::debug!(%e, "SSE stream error");
-                    break;
+                    tracing::warn!(%e, "SSE connect failed");
+                    let retry = Self::maybe_reconnect_or_signal(
+                        &client,
+                        session_id,
+                        &mut completion_tx,
+                        &mut consecutive_disconnects,
+                        "sse_connect_failed",
+                    )
+                    .await;
+                    if retry {
+                        continue 'reconnect;
+                    }
+                    return;
                 }
             };
 
-            buf.push_str(&String::from_utf8_lossy(&bytes));
+            let mut stream = resp.bytes_stream();
+            let mut buf = String::new();
 
-            // Process complete SSE frames (delimited by blank lines).
-            while let Some(pos) = buf.find("\n\n") {
-                let frame = buf[..pos].to_string();
-                buf = buf[pos + 2..].to_string();
-
-                for line in frame.lines() {
-                    let data = match line
-                        .strip_prefix("data: ")
-                        .or_else(|| line.strip_prefix("data:"))
-                    {
-                        Some(d) => d.trim(),
-                        None => continue,
-                    };
-
-                    let event: serde_json::Value = match serde_json::from_str(data) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::debug!(%e, sse_data = %data, "SSE data not parseable as JSON");
-                            continue;
+            loop {
+                let chunk = match tokio::time::timeout(sse_idle_timeout, stream.next()).await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => {
+                        tracing::warn!(
+                            "SSE stream closed before terminal event, checking liveness/reconnect"
+                        );
+                        let retry = Self::maybe_reconnect_or_signal(
+                            &client,
+                            session_id,
+                            &mut completion_tx,
+                            &mut consecutive_disconnects,
+                            "sse_stream_closed_without_terminal_event",
+                        )
+                        .await;
+                        if retry {
+                            continue 'reconnect;
                         }
-                    };
-
-                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    tracing::debug!(%event_type, "SSE event received");
-                    seq = seq.saturating_add(1);
-
-                    // Tee to VictoriaLogs best-effort. Never block the SSE reader.
-                    if let (Some(v), Some(ctx)) = (victoria.as_ref(), victoria_ctx.as_ref()) {
-                        v.enqueue_event(ctx, seq, &event);
+                        return;
                     }
-
-                    // Update last-active timestamp.
-                    if let Some(ref ts) = last_sse_epoch_ms {
-                        ts.store(Utc::now().timestamp_millis(), Ordering::Relaxed);
-                    }
-
-                    // Auto-approve permission requests in bypass mode.
-                    if bypass_permissions && event_type == "permission.requested" {
-                        if let Some(perm_id) = event
-                            .get("data")
-                            .and_then(|d| d.get("permission_id"))
-                            .and_then(|p| p.as_str())
-                        {
-                            tracing::info!(%perm_id, "auto-approving permission (bypass)");
-                            if let Err(e) =
-                                client.permission_reply(session_id, perm_id, "always").await
-                            {
-                                tracing::warn!(%e, %perm_id, "permission_reply failed");
+                    Err(_timeout) => {
+                        // SSE idle timeout — check session status via REST fallback.
+                        tracing::info!(
+                            "SSE idle timeout after 120s, checking session status via REST"
+                        );
+                        match client.session_liveness(session_id).await {
+                            Ok(SessionLiveness::Ended) => {
+                                tracing::info!(
+                                    "SSE idle timeout: session ended (confirmed via REST)"
+                                );
+                                if let Some(tx) = completion_tx.take() {
+                                    let _ = tx.send(SessionTerminalSignal::Completed);
+                                }
+                                return;
+                            }
+                            Ok(SessionLiveness::Active) => {
+                                tracing::debug!(
+                                    "SSE idle timeout: session still active per REST, continuing"
+                                );
+                                continue;
+                            }
+                            Ok(SessionLiveness::Missing) => {
+                                tracing::warn!(
+                                    "SSE idle timeout: session missing via REST, treating as aborted"
+                                );
+                                if let Some(tx) = completion_tx.take() {
+                                    let _ = tx.send(SessionTerminalSignal::Aborted {
+                                        reason: "session_missing".to_string(),
+                                    });
+                                }
+                                return;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %e,
+                                    "runtime.dependency.unreachable: REST session check failed during SSE idle timeout"
+                                );
+                                if let Some(tx) = completion_tx.take() {
+                                    let _ = tx.send(SessionTerminalSignal::Aborted {
+                                        reason: "rest_session_check_failed".to_string(),
+                                    });
+                                }
+                                return;
                             }
                         }
                     }
+                };
 
-                    // Detect session completion via top-level event type.
-                    if event_type == "session.ended" {
-                        tracing::info!(%event_type, "session.ended event received");
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(SessionTerminalSignal::Completed);
-                        }
+                let bytes = match chunk {
+                    Ok(b) => {
+                        consecutive_disconnects = 0;
+                        b
                     }
+                    Err(e) => {
+                        tracing::warn!(%e, "SSE stream error; checking liveness/reconnect");
+                        let retry = Self::maybe_reconnect_or_signal(
+                            &client,
+                            session_id,
+                            &mut completion_tx,
+                            &mut consecutive_disconnects,
+                            "sse_stream_closed_without_terminal_event",
+                        )
+                        .await;
+                        if retry {
+                            continue 'reconnect;
+                        }
+                        return;
+                    }
+                };
 
-                    // Detect turn.completed — only signal completion if complete_on_turn is set.
-                    if event_type == "turn.completed" {
-                        tracing::info!(%event_type, %complete_on_turn, "turn.completed event received");
-                        if complete_on_turn {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+
+                // Process complete SSE frames (delimited by blank lines).
+                while let Some(pos) = buf.find("\n\n") {
+                    let frame = buf[..pos].to_string();
+                    buf = buf[pos + 2..].to_string();
+
+                    for line in frame.lines() {
+                        let data = match line
+                            .strip_prefix("data: ")
+                            .or_else(|| line.strip_prefix("data:"))
+                        {
+                            Some(d) => d.trim(),
+                            None => continue,
+                        };
+
+                        let event: serde_json::Value = match serde_json::from_str(data) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::debug!(
+                                    %e,
+                                    sse_data = %data,
+                                    "SSE data not parseable as JSON"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        tracing::debug!(%event_type, "SSE event received");
+                        seq = seq.saturating_add(1);
+
+                        // Tee to VictoriaLogs best-effort. Never block the SSE reader.
+                        if let (Some(v), Some(ctx)) = (victoria.as_ref(), victoria_ctx.as_ref()) {
+                            v.enqueue_event(ctx, seq, &event);
+                        }
+
+                        // Update last-active timestamp.
+                        if let Some(ref ts) = last_sse_epoch_ms {
+                            ts.store(Utc::now().timestamp_millis(), Ordering::Relaxed);
+                        }
+
+                        // Auto-approve permission requests in bypass mode.
+                        if bypass_permissions && event_type == "permission.requested" {
+                            if let Some(perm_id) = event
+                                .get("data")
+                                .and_then(|d| d.get("permission_id"))
+                                .and_then(|p| p.as_str())
+                            {
+                                tracing::info!(%perm_id, "auto-approving permission (bypass)");
+                                if let Err(e) =
+                                    client.permission_reply(session_id, perm_id, "always").await
+                                {
+                                    tracing::warn!(%e, %perm_id, "permission_reply failed");
+                                }
+                            }
+                        }
+
+                        // Detect session completion via top-level event type.
+                        if event_type == "session.ended" {
+                            tracing::info!(%event_type, "session.ended event received");
                             if let Some(tx) = completion_tx.take() {
                                 let _ = tx.send(SessionTerminalSignal::Completed);
                             }
                         }
-                    }
 
-                    // Detect turn.completed embedded as status label in item.completed.
-                    if event_type == "item.completed" {
-                        if let Some(item) = event.get("data").and_then(|d| d.get("item")) {
-                            let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-                            if kind == "status" {
-                                if let Some(content) =
-                                    item.get("content").and_then(|c| c.as_array())
-                                {
-                                    for c in content {
-                                        let label =
-                                            c.get("label").and_then(|l| l.as_str()).unwrap_or("");
-                                        if label == "turn.completed" {
-                                            let detail_str = c
-                                                .get("detail")
-                                                .and_then(|d| d.as_str())
+                        // Detect turn.completed — only signal completion if complete_on_turn is set.
+                        if event_type == "turn.completed" {
+                            tracing::info!(
+                                %event_type,
+                                %complete_on_turn,
+                                "turn.completed event received"
+                            );
+                            if complete_on_turn {
+                                if let Some(tx) = completion_tx.take() {
+                                    let _ = tx.send(SessionTerminalSignal::Completed);
+                                }
+                            }
+                        }
+
+                        // Detect turn.completed embedded as status label in item.completed.
+                        if event_type == "item.completed" {
+                            if let Some(item) = event.get("data").and_then(|d| d.get("item")) {
+                                let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                if kind == "status" {
+                                    if let Some(content) =
+                                        item.get("content").and_then(|c| c.as_array())
+                                    {
+                                        for c in content {
+                                            let label = c
+                                                .get("label")
+                                                .and_then(|l| l.as_str())
                                                 .unwrap_or("");
-                                            let failed =
-                                                detail_str.contains("\"status\":\"failed\"");
-                                            if failed {
-                                                tracing::warn!(detail = %detail_str, "turn.completed with failure");
-                                            } else {
-                                                tracing::info!(%complete_on_turn, "turn.completed status detected");
-                                            }
-                                            if complete_on_turn {
-                                                if let Some(tx) = completion_tx.take() {
-                                                    if failed {
-                                                        let _ = tx.send(SessionTerminalSignal::Failed {
-                                                            reason: "turn_completed_failed".to_string(),
-                                                        });
-                                                    } else {
-                                                        let _ = tx.send(SessionTerminalSignal::Completed);
+                                            if label == "turn.completed" {
+                                                let detail_str = c
+                                                    .get("detail")
+                                                    .and_then(|d| d.as_str())
+                                                    .unwrap_or("");
+                                                let failed =
+                                                    detail_str.contains("\"status\":\"failed\"");
+                                                if failed {
+                                                    tracing::warn!(
+                                                        detail = %detail_str,
+                                                        "turn.completed with failure"
+                                                    );
+                                                } else {
+                                                    tracing::info!(
+                                                        %complete_on_turn,
+                                                        "turn.completed status detected"
+                                                    );
+                                                }
+                                                if complete_on_turn {
+                                                    if let Some(tx) = completion_tx.take() {
+                                                        if failed {
+                                                            let _ = tx.send(
+                                                                SessionTerminalSignal::Failed {
+                                                                    reason: "turn_completed_failed"
+                                                                        .to_string(),
+                                                                },
+                                                            );
+                                                        } else {
+                                                            let _ = tx.send(
+                                                                SessionTerminalSignal::Completed,
+                                                            );
+                                                        }
                                                     }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if kind == "tool_result" {
+                                    if let Some(content) =
+                                        item.get("content").and_then(|c| c.as_array())
+                                    {
+                                        for c in content {
+                                            let call_id = c
+                                                .get("call_id")
+                                                .and_then(|id| id.as_str())
+                                                .unwrap_or("unknown");
+                                            let output_val = c.get("output");
+                                            let output_str =
+                                                output_val.and_then(|v| v.as_str()).map(str::trim);
+                                            let null_tool_output =
+                                                matches!(output_val, Some(serde_json::Value::Null))
+                                                    || matches!(output_str, Some("null"));
+
+                                            if null_tool_output {
+                                                let output_preview = output_str
+                                                    .map(|s| {
+                                                        if s.len() <= 160 {
+                                                            s.to_string()
+                                                        } else {
+                                                            format!("{}...", &s[..160])
+                                                        }
+                                                    })
+                                                    .unwrap_or_else(|| "null".to_string());
+                                                tracing::error!(
+                                                    tool_call_id = %call_id,
+                                                    output_preview = %output_preview,
+                                                    "MCP tool returned null output; failing loudly to avoid silent first-turn hangs"
+                                                );
+                                                Self::emit_runtime_status_event(
+                                                    victoria.as_ref(),
+                                                    victoria_ctx.as_ref(),
+                                                    "runtime.tool_result.null_output",
+                                                    serde_json::json!({
+                                                        "tool_call_id": call_id,
+                                                        "output_preview": output_preview,
+                                                        "reason_code": "mcp_tool_returned_null_result",
+                                                    }),
+                                                );
+                                                if let Some(tx) = completion_tx.take() {
+                                                    let _ = tx.send(SessionTerminalSignal::Failed {
+                                                        reason: format!(
+                                                            "mcp_tool_returned_null_result:{call_id}"
+                                                        ),
+                                                    });
                                                 }
                                             }
                                         }
@@ -627,45 +900,38 @@ impl SandboxRuntime {
                                 }
                             }
                         }
-                    }
 
-                    // Detect errors.
-                    if event_type == "error" {
-                        let msg = event
-                            .get("data")
-                            .and_then(|d| d.get("message"))
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("unknown error");
-                        tracing::warn!(%msg, "error event received");
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(SessionTerminalSignal::Failed {
-                                reason: msg.to_string(),
-                            });
-                        }
-                    }
-
-                    // Forward to collector. Avoid blocking the SSE reader on
-                    // high-volume delta streams, otherwise completion signals can
-                    // be delayed indefinitely under backpressure.
-                    let is_delta = event_type == "item.delta";
-                    match events_tx.try_send(event) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(ev)) => {
-                            if !is_delta {
-                                let _ = events_tx.send(ev).await;
+                        // Detect errors.
+                        if event_type == "error" {
+                            let msg = event
+                                .get("data")
+                                .and_then(|d| d.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown error");
+                            tracing::warn!(%msg, "error event received");
+                            if let Some(tx) = completion_tx.take() {
+                                let _ = tx.send(SessionTerminalSignal::Failed {
+                                    reason: msg.to_string(),
+                                });
                             }
                         }
-                        Err(TrySendError::Closed(_)) => {}
+
+                        // Forward to collector. Avoid blocking the SSE reader on
+                        // high-volume delta streams, otherwise completion signals can
+                        // be delayed indefinitely under backpressure.
+                        let is_delta = event_type == "item.delta";
+                        match events_tx.try_send(event) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(ev)) => {
+                                if !is_delta {
+                                    let _ = events_tx.send(ev).await;
+                                }
+                            }
+                            Err(TrySendError::Closed(_)) => {}
+                        }
                     }
                 }
             }
-        }
-
-        // Stream ended without explicit session.ended.
-        if let Some(tx) = completion_tx {
-            let _ = tx.send(SessionTerminalSignal::Aborted {
-                reason: "sse_stream_closed_without_terminal_event".to_string(),
-            });
         }
     }
 
@@ -943,5 +1209,39 @@ impl SandboxRuntime {
     /// Get a client for an existing sandbox handle.
     pub fn client_for(&self, handle: &SandboxHandle) -> SandboxAgentClient {
         SandboxAgentClient::new(&handle.sandbox_agent_url, None)
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::SandboxRuntime;
+
+    #[test]
+    fn argo_origin_unregistered_error_is_detected() {
+        let msg = "backend error: GET /v1/sessions failed: 530 The origin has been unregistered from Argo Tunnel";
+        assert!(SandboxRuntime::is_argo_origin_unregistered_error(msg));
+    }
+
+    #[test]
+    fn unrelated_error_is_not_misclassified() {
+        let msg = "backend error: GET /v1/sessions failed: 500 internal";
+        assert!(!SandboxRuntime::is_argo_origin_unregistered_error(msg));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SandboxRuntime;
+    use std::time::Duration;
+
+    #[test]
+    fn sse_reconnect_backoff_grows_and_caps() {
+        // Base is >=100ms. Backoff should increase with attempt index and cap at 5s.
+        let d0 = SandboxRuntime::sse_reconnect_backoff(0);
+        let d1 = SandboxRuntime::sse_reconnect_backoff(1);
+        let d2 = SandboxRuntime::sse_reconnect_backoff(2);
+        assert!(d1 > d0);
+        assert!(d2 > d1);
+        assert!(SandboxRuntime::sse_reconnect_backoff(32) <= Duration::from_secs(5));
     }
 }

@@ -291,14 +291,34 @@ impl SandboxAgentClient {
             )));
         }
 
-        let rpc_resp: JsonRpcResponse = resp.json().await.map_err(Error::backend_reqwest)?;
+        let rpc_raw: serde_json::Value = resp.json().await.map_err(Error::backend_reqwest)?;
+        let rpc_resp: JsonRpcResponse = serde_json::from_value(rpc_raw.clone()).map_err(|e| {
+            Error::BackendMessage(format!(
+                "ACP {method} failed: invalid JSON-RPC response: {e}"
+            ))
+        })?;
         if let Some(err) = rpc_resp.error {
             return Err(Error::BackendMessage(format!(
                 "ACP {method} failed: {} (code {})",
                 err.message, err.code
             )));
         }
-        Ok(rpc_resp.result.unwrap_or(serde_json::Value::Null))
+        let Some(result_raw) = rpc_raw.get("result") else {
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed: missing JSON-RPC result field"
+            )));
+        };
+        if result_raw.is_null() {
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed: JSON-RPC result was null"
+            )));
+        }
+        let Some(result) = rpc_resp.result else {
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed: missing JSON-RPC result field"
+            )));
+        };
+        Ok(result)
     }
 
     // -----------------------------------------------------------------------
@@ -591,16 +611,18 @@ impl SandboxAgentClient {
             .json()
             .await
             .map_err(|e| Error::BackendMessage(format!("GET /v1/sessions: bad response: {e}")))?;
-        Ok(match list
-            .sessions
-            .iter()
-            .find(|s| s.session_id == session_id)
-            .map(|s| s.ended)
-        {
-            Some(true) => SessionLiveness::Ended,
-            Some(false) => SessionLiveness::Active,
-            None => SessionLiveness::Missing,
-        })
+        Ok(
+            match list
+                .sessions
+                .iter()
+                .find(|s| s.session_id == session_id)
+                .map(|s| s.ended)
+            {
+                Some(true) => SessionLiveness::Ended,
+                Some(false) => SessionLiveness::Active,
+                None => SessionLiveness::Missing,
+            },
+        )
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -619,4 +641,60 @@ impl SandboxAgentClient {
 /// Parse a single SSE `data:` payload into a JSON-RPC message.
 pub fn parse_sse_json_rpc(data: &str) -> Option<JsonRpcMessage> {
     serde_json::from_str(data).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SandboxAgentClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn acp_session_prompt_fails_loud_on_missing_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/acp/s1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SandboxAgentClient::new(server.uri(), None);
+        let err = client
+            .acp_session_prompt("s1", "session-1", "hello")
+            .await
+            .expect_err("missing JSON-RPC result should fail loudly");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("missing JSON-RPC result field"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_session_prompt_fails_loud_on_null_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/acp/s1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": null
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SandboxAgentClient::new(server.uri(), None);
+        let err = client
+            .acp_session_prompt("s1", "session-1", "hello")
+            .await
+            .expect_err("null JSON-RPC result should fail loudly");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("JSON-RPC result was null"),
+            "unexpected error: {msg}"
+        );
+    }
 }
