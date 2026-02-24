@@ -16,3 +16,5 @@ pub mod traits;
 pub mod webhook;
 
 pub use error::{Error, Result};
+pub use postgres::PostgresEventBus;
+pub use sqlite::SqliteEventBus;

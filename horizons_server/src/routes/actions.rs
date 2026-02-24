@@ -160,7 +160,7 @@ pub async fn approve_action(
         return Ok(Json(serde_json::json!({ "status": "ok" })));
     }
 
-    // Fallback for older consumers: scan all org projects and approve the first match.
+    // Strict for older consumers: scan all org projects and approve the first match.
     let reason = req
         .as_ref()
         .map(|r| r.reason.as_str())
@@ -221,7 +221,7 @@ pub async fn deny_action(
         return Ok(Json(serde_json::json!({ "status": "ok" })));
     }
 
-    // Fallback for older consumers: scan all org projects and deny the first match.
+    // Strict for older consumers: scan all org projects and deny the first match.
     let reason = req.as_ref().map(|r| r.reason.as_str()).unwrap_or("denied");
     let mut offset = 0usize;
     let scan_limit = std::env::var("HORIZONS_ACTION_DENY_SCAN_LIMIT")

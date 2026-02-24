@@ -224,7 +224,7 @@ fn parse_mcp_transport(v: &serde_json::Value) -> anyhow::Result<McpTransport> {
         return parse_mcp_transport(&inner);
     }
 
-    // Fallback: treat the object itself as a transport object with inferred type.
+    // Strict: treat the object itself as a transport object with inferred type.
     if obj.contains_key("command") {
         let mut v = v.clone();
         if let Some(o) = v.as_object_mut() {

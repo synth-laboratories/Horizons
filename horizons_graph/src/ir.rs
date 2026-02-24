@@ -143,7 +143,7 @@ pub fn validate_graph_ir(graph: &GraphIr, strictness: Strictness) -> ValidationR
         }
         diagnostics.extend(validate_graph_definition_value(graph_value, strictness));
     } else {
-        diagnostics.extend(validate_legacy_graph_ir(graph, strictness));
+        diagnostics.extend(validate_canonical_graph_ir(graph, strictness));
     }
 
     ValidationResult { diagnostics }
@@ -181,7 +181,7 @@ pub fn hash_graph_ir(graph: &GraphIr) -> Result<String, serde_json::Error> {
     Ok(hex::encode(digest))
 }
 
-fn validate_legacy_graph_ir(graph: &GraphIr, strictness: Strictness) -> Vec<Diagnostic> {
+fn validate_canonical_graph_ir(graph: &GraphIr, strictness: Strictness) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     if graph.nodes.is_empty() {

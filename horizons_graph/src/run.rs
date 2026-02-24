@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,6 +15,34 @@ pub struct RunConfig {
     pub stream_completions: Option<bool>,
     #[serde(default)]
     pub rlm_event_level: Option<String>,
+    #[serde(default)]
+    pub tool_executor: Option<ToolExecutorConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolExecutorConfig {
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub transport: Option<ToolExecutorTransport>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutorTransport {
+    Execute,
+    Mcp,
+}
+
+impl Default for ToolExecutorTransport {
+    fn default() -> Self {
+        Self::Execute
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

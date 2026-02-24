@@ -34,7 +34,7 @@ externalPostgres:
 externalRedis:
   url: ""
 
-# -- Persistence for dev (SQLite fallback; not needed with in-cluster PG)
+# -- Persistence for dev (SQLite strict; not needed with in-cluster PG)
 persistence:
   enabled: false
 

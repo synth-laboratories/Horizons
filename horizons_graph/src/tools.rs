@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::error::{GraphError, Result};
+use crate::run::{ToolExecutorConfig, ToolExecutorTransport};
 
 #[cfg(feature = "rlm_v1")]
 use crate::rlm_v1::tools::python_sandbox::MontyREPL;
@@ -79,6 +80,8 @@ pub struct DefaultToolExecutor {
     client: reqwest::Client,
     endpoint: Option<String>,
     api_key: Option<String>,
+    headers: HashMap<String, String>,
+    transport: ToolExecutorTransport,
 }
 
 impl DefaultToolExecutor {
@@ -95,7 +98,45 @@ impl DefaultToolExecutor {
             client: reqwest::Client::new(),
             endpoint,
             api_key,
+            headers: HashMap::new(),
+            transport: ToolExecutorTransport::Execute,
         }
+    }
+
+    pub fn from_request_config(cfg: Option<&ToolExecutorConfig>) -> Self {
+        let mut executor = Self::from_env();
+        let Some(cfg) = cfg else {
+            return executor;
+        };
+
+        if let Some(endpoint) = cfg.endpoint.as_deref() {
+            let endpoint = endpoint.trim();
+            if !endpoint.is_empty() {
+                executor.endpoint = Some(endpoint.trim_end_matches('/').to_string());
+            }
+        }
+        if let Some(api_key) = cfg.api_key.as_deref() {
+            let api_key = api_key.trim();
+            if !api_key.is_empty() {
+                executor.api_key = Some(api_key.to_string());
+            }
+        }
+        if let Some(headers) = cfg.headers.as_ref() {
+            for (key, value) in headers {
+                let key = key.trim();
+                let value = value.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                if !value.is_empty() {
+                    executor.headers.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+        if let Some(transport) = cfg.transport {
+            executor.transport = transport;
+        }
+        executor
     }
 
     /// Execute a tool - routes to Rust implementation for local tools, Python for others.
@@ -212,15 +253,33 @@ impl DefaultToolExecutor {
             .endpoint
             .as_ref()
             .ok_or_else(|| GraphError::unavailable("tool executor not configured"))?;
-        let url = format!("{endpoint}/execute");
-        let mut request = self.client.post(url).json(&serde_json::json!({
-            "tool": tool_name,
-            "args": args,
-            "context": context,
-        }));
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
+        let mut request = match self.transport {
+            ToolExecutorTransport::Execute => {
+                let url = format!("{endpoint}/execute");
+                self.client.post(url).json(&serde_json::json!({
+                    "tool": tool_name,
+                    "args": args,
+                    "context": context,
+                }))
+            }
+            ToolExecutorTransport::Mcp => {
+                let url = if endpoint.ends_with("/call") {
+                    endpoint.to_string()
+                } else {
+                    format!("{endpoint}/call")
+                };
+                self.client.post(url).json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": "graph-rlm-tool",
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": args,
+                    },
+                }))
+            }
+        };
+        request = self.apply_auth_headers(request);
         let response = request
             .send()
             .await
@@ -236,12 +295,55 @@ impl DefaultToolExecutor {
             )));
         }
         let parsed = response.json::<Value>().await;
-        match parsed {
-            Ok(value) => Ok(value),
-            Err(_) => Ok(Value::String(
-                "tool executor returned non-json response".to_string(),
-            )),
+        match self.transport {
+            ToolExecutorTransport::Execute => match parsed {
+                Ok(value) => Ok(value),
+                Err(_) => Ok(Value::String(
+                    "tool executor returned non-json response".to_string(),
+                )),
+            },
+            ToolExecutorTransport::Mcp => match parsed {
+                Ok(value) => {
+                    if let Some(error) = value.get("error") {
+                        return Err(GraphError::internal(format!(
+                            "tool executor returned jsonrpc error: {error}"
+                        )));
+                    }
+                    if let Some(result) = value.get("result") {
+                        Ok(result.clone())
+                    } else {
+                        Err(GraphError::internal(
+                            "tool executor did not return jsonrpc result".to_string(),
+                        ))
+                    }
+                }
+                Err(_) => Ok(Value::String(
+                    "tool executor returned non-json response".to_string(),
+                )),
+            },
         }
+    }
+
+    fn apply_auth_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let mut has_authorization = false;
+        for key in self.headers.keys() {
+            if key.eq_ignore_ascii_case("authorization") {
+                has_authorization = true;
+                break;
+            }
+        }
+
+        if let Some(api_key) = &self.api_key {
+            if !api_key.trim().is_empty() && !has_authorization {
+                request = request.bearer_auth(api_key.trim());
+            }
+        }
+
+        for (key, value) in &self.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        request
     }
 
     // =========================================================================

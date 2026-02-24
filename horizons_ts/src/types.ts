@@ -72,7 +72,7 @@ export type ActionStatus =
   | "approved"
   | "denied"
   | "dispatched"
-  // Legacy name (server previously returned "executed" for "dispatched").
+  // Canonical name (server previously returned "executed" for "dispatched").
   | "executed"
   | "expired";
 

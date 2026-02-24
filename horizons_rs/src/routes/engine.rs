@@ -127,7 +127,11 @@ async fn run_engine(
         image: req.image,
         env_vars,
         timeout_seconds: req.timeout_seconds,
+        no_progress_timeout_seconds: 180,
         workdir: None,
+        docker_socket: false,
+        restart_policy: None,
+        log_tags: std::collections::HashMap::new(),
     };
 
     let (result, handle) = runtime.run_agent(&config, &req.instruction).await?;
@@ -175,10 +179,14 @@ async fn start_engine(
         image: req.image,
         env_vars,
         timeout_seconds: req.timeout_seconds,
+        no_progress_timeout_seconds: 180,
         workdir: None,
+        docker_socket: false,
+        restart_policy: None,
+        log_tags: std::collections::HashMap::new(),
     };
 
-    let (handle, session_id) = runtime.start_agent(&config, &req.instruction).await?;
+    let (handle, session_id, _last_sse, _channels) = runtime.start_agent(&config, &req.instruction).await?;
 
     // Store the handle for later access.
     {
@@ -214,46 +222,59 @@ async fn events_sse(
     let client = SandboxAgentClient::new(&handle.sandbox_agent_url, None);
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
+    // Proxy the REST SSE event stream to the HTTP client.
+    let session_id = handle_id.clone();
     tokio::spawn(async move {
-        let mut offset: u64 = 0;
+        let resp = match client.events_sse_connect(&session_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx
+                    .send(
+                        SseEvent::default()
+                            .event("error")
+                            .data(format!("SSE connect error: {e}")),
+                    )
+                    .await;
+                return;
+            }
+        };
 
-        loop {
-            match client.fetch_events("", offset).await {
-                Ok(resp) => {
-                    for event in &resp.events {
-                        if let Some(seq) = event.get("sequence").and_then(|v| v.as_u64()) {
-                            if seq > offset {
-                                offset = seq;
-                            }
-                        }
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
 
-                        let data = serde_json::to_string(event).unwrap_or_default();
-                        let sse = SseEvent::default().event("event").data(data);
-                        if tx.send(sse).await.is_err() {
-                            return; // Client disconnected.
-                        }
-
-                        // Check for session ended.
-                        if event.get("type").and_then(|t| t.as_str()) == Some("session.ended") {
-                            let _ = tx.send(SseEvent::default().event("done")).await;
-                            return;
-                        }
-                    }
-                }
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
                 Err(e) => {
                     let _ = tx
                         .send(
                             SseEvent::default()
                                 .event("error")
-                                .data(format!("event poll error: {e}")),
+                                .data(format!("SSE stream error: {e}")),
                         )
                         .await;
                     return;
                 }
-            }
+            };
 
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buf.find("\n\n") {
+                let frame = buf[..pos].to_string();
+                buf = buf[pos + 2..].to_string();
+
+                for line in frame.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let sse = SseEvent::default().event("event").data(data.to_string());
+                        if tx.send(sse).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
         }
+
+        let _ = tx.send(SseEvent::default().event("done")).await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok);

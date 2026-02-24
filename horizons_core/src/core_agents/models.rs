@@ -109,7 +109,7 @@ pub enum ActionStatus {
     Denied,
     /// The action has been dispatched (e.g. an outbound event was published).
     ///
-    /// Legacy stored values may use `"executed"`; treat them as dispatched.
+    /// Canonical stored values may use `"executed"`; treat them as dispatched.
     #[serde(alias = "executed")]
     Dispatched,
     Expired,

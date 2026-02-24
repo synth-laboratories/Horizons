@@ -94,7 +94,7 @@ nodes:
                 except:
                     pass
             
-            # Fallback: create basic structure
+            # Strict: create basic structure
             return {
                 "event_reviews": [{"criteria": {}, "total": 0.5, "summary": "RLM evaluation"}],
                 "outcome_review": {"criteria": {}, "total": 0.5, "summary": "RLM evaluation"},

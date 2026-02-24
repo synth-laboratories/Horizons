@@ -1,21 +1,23 @@
-//! HTTP client for the sandbox-agent API (https://github.com/rivet-dev/sandbox-agent).
+//! HTTP client for the sandbox-agent REST API.
 //!
-//! sandbox-agent runs inside provisioned containers and exposes an HTTP API on
-//! port 2468 for managing coding agent sessions (Codex, Claude Code, OpenCode).
-//! This module provides a typed Rust client that drives the session lifecycle:
-//! create → send message → poll events → handle permissions → terminate.
+//! sandbox-agent (v0.2.0+) runs inside provisioned containers and exposes a
+//! REST API on port 2468 for managing coding agent sessions
+//! (Codex, Claude Code, OpenCode, Amp).
+//!
+//! Protocol flow:
+//!   POST /v1/sessions/{session_id}                            → create session
+//!   POST /v1/sessions/{session_id}/messages                   → send message (fire-and-forget)
+//!   GET  /v1/sessions/{session_id}/events/sse                 → universal event stream
+//!   POST /v1/sessions/{session_id}/permissions/{id}/reply     → approve/deny permission
+//!   POST /v1/sessions/{session_id}/terminate                  → terminate session
 //!
 //! Event types are re-exported from the `sandbox_agent_universal_agent_schema`
 //! crate for type-safe deserialization.
 
 use crate::{Error, Result};
-use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 // Re-export universal event types from the sandbox-agent crate so downstream
 // code (sandbox_runtime, sandboxed_agent) can use them without a direct dep.
@@ -25,59 +27,147 @@ pub use sandbox_agent_universal_agent_schema::{
 };
 
 // ---------------------------------------------------------------------------
-// Request / response types for the sandbox-agent HTTP API
+// ACP JSON-RPC types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateSessionRequest {
-    pub agent: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+pub struct JsonRpcRequest {
+    pub jsonrpc: &'static str,
+    pub method: String,
+    pub id: serde_json::Value,
+    pub params: serde_json::Value,
 }
 
+impl JsonRpcRequest {
+    pub fn new(method: &str, id: impl Into<serde_json::Value>, params: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            method: method.to_string(),
+            id: id.into(),
+            params,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: String,
+    pub id: Option<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<serde_json::Value>,
+}
+
+/// A JSON-RPC message received on the SSE stream.
+/// Can be a notification (no id), a server request (has id+method), or a response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcMessage {
+    pub jsonrpc: Option<String>,
+    pub id: Option<serde_json::Value>,
+    pub method: Option<String>,
+    pub params: Option<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<JsonRpcError>,
+}
+
+// ---------------------------------------------------------------------------
+// ACP response types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpInitResult {
+    pub protocol_version: serde_json::Value,
+    pub agent_info: Option<serde_json::Value>,
+    pub agent_capabilities: Option<serde_json::Value>,
+    pub auth_methods: Option<Vec<AcpAuthMethod>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcpAuthMethod {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpSessionNewResult {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpPromptResult {
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpServerInfo {
+    pub server_id: String,
+    pub agent: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcpServerListResponse {
+    pub servers: Vec<AcpServerInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// REST API response types
+// ---------------------------------------------------------------------------
+
+/// Response from `POST /v1/sessions/{session_id}`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionResponse {
     pub healthy: bool,
-    pub error: Option<serde_json::Value>,
+    #[serde(default)]
     pub native_session_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct MessageRequest {
-    pub message: String,
-}
+// ---------------------------------------------------------------------------
+// Session list types (for REST strict health checks)
+// ---------------------------------------------------------------------------
 
+/// A single session entry from `GET /v1/sessions`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EventsResponse {
-    pub events: Vec<serde_json::Value>,
-    pub has_more: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
+pub struct SessionListEntry {
     pub session_id: String,
-    pub agent: String,
+    #[serde(default)]
     pub ended: bool,
-    pub event_count: u64,
 }
 
+/// Response from `GET /v1/sessions`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionListResponse {
-    pub sessions: Vec<SessionInfo>,
+    pub sessions: Vec<SessionListEntry>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PermissionReplyRequest {
-    pub reply: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLiveness {
+    Active,
+    Ended,
+    Missing,
 }
+
+// ---------------------------------------------------------------------------
+// Canonical types (kept for backward compat with existing code)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HealthResponse {
@@ -91,28 +181,15 @@ pub struct HealthResponse {
 /// HTTP client for a single sandbox-agent instance.
 ///
 /// Each provisioned sandbox gets its own `SandboxAgentClient` pointed at the
-/// sandbox-agent's base URL.
+/// sandbox-agent's base URL. Uses ACP (Agent Client Protocol) JSON-RPC for
+/// session management.
 #[derive(Debug, Clone)]
 pub struct SandboxAgentClient {
     base_url: String,
     http: Client,
+    /// Long-timeout client for prompt requests that may block for minutes.
+    http_long: Client,
     auth_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct CompatSessionState {
-    acp_session_id: Option<String>,
-    next_seq: u64,
-    queued_events: Vec<serde_json::Value>,
-}
-
-fn compat_state() -> &'static Mutex<HashMap<String, CompatSessionState>> {
-    static STATE: OnceLock<Mutex<HashMap<String, CompatSessionState>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn compat_key(base_url: &str, session_id: &str) -> String {
-    format!("{base_url}::{session_id}")
 }
 
 impl SandboxAgentClient {
@@ -122,9 +199,14 @@ impl SandboxAgentClient {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("failed to build reqwest client");
+        let http_long = Client::builder()
+            .timeout(Duration::from_secs(600))
+            .build()
+            .expect("failed to build long-timeout reqwest client");
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http,
+            http_long,
             auth_token,
         }
     }
@@ -141,100 +223,8 @@ impl SandboxAgentClient {
         }
     }
 
-    async fn acp_post(
-        &self,
-        server_id: &str,
-        agent: Option<&str>,
-        payload: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let mut url = self.url(&format!("/v1/acp/{server_id}"));
-        if let Some(agent) = agent {
-            let sep = if url.contains('?') { "&" } else { "?" };
-            url.push_str(sep);
-            url.push_str("agent=");
-            url.push_str(agent);
-        }
-        let req = self.apply_auth(
-            self.http
-                .post(url)
-                .header("content-type", "application/json")
-                .json(payload),
-        );
-        let resp = req.send().await.map_err(Error::backend_reqwest)?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::BackendMessage(format!(
-                "sandbox-agent acp post failed: {body}"
-            )));
-        }
-        resp.json::<serde_json::Value>()
-            .await
-            .map_err(Error::backend_reqwest)
-    }
-
-    async fn acp_collect_until_prompt_done(
-        &self,
-        server_id: &str,
-        prompt_id: u64,
-    ) -> Result<Vec<serde_json::Value>> {
-        let req = self.apply_auth(
-            self.http
-                .get(self.url(&format!("/v1/acp/{server_id}")))
-                .header("accept", "text/event-stream"),
-        );
-        let resp = req.send().await.map_err(Error::backend_reqwest)?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::BackendMessage(format!(
-                "sandbox-agent acp stream failed: {body}"
-            )));
-        }
-
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
-        let mut out = Vec::new();
-
-        let collect = async {
-            while let Some(chunk_res) = stream.next().await {
-                let chunk = chunk_res.map_err(Error::backend_reqwest)?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-
-                while let Some(split) = buf.find("\n\n") {
-                    let block = buf[..split].to_string();
-                    buf = buf[split + 2..].to_string();
-
-                    for line in block.lines() {
-                        let Some(data) = line.strip_prefix("data: ") else {
-                            continue;
-                        };
-                        let envelope: serde_json::Value = match serde_json::from_str(data) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        let done = envelope.get("id").and_then(|v| v.as_u64()) == Some(prompt_id)
-                            && (envelope.get("result").is_some()
-                                || envelope.get("error").is_some());
-                        out.push(envelope);
-                        if done {
-                            return Ok::<(), Error>(());
-                        }
-                    }
-                }
-            }
-            Ok::<(), Error>(())
-        };
-
-        tokio::time::timeout(Duration::from_secs(60), collect)
-            .await
-            .map_err(|_| {
-                Error::BackendMessage("timeout waiting for ACP prompt result".to_string())
-            })??;
-
-        Ok(out)
-    }
-
     // -----------------------------------------------------------------------
-    // Health
+    // Health (unchanged — REST endpoint still works)
     // -----------------------------------------------------------------------
 
     /// Check if the sandbox-agent server is healthy.
@@ -246,7 +236,7 @@ impl SandboxAgentClient {
     }
 
     // -----------------------------------------------------------------------
-    // Agent management
+    // Agent management (unchanged — REST endpoint still works)
     // -----------------------------------------------------------------------
 
     /// Install a coding agent inside the sandbox.
@@ -268,259 +258,443 @@ impl SandboxAgentClient {
     }
 
     // -----------------------------------------------------------------------
-    // Session lifecycle
+    // ACP: JSON-RPC helpers
     // -----------------------------------------------------------------------
 
-    /// Create a new agent session.
+    /// Send a JSON-RPC request to the ACP endpoint and parse the response.
+    async fn acp_rpc(
+        &self,
+        server_id: &str,
+        query: Option<&str>,
+        method: &str,
+        id: u64,
+        params: serde_json::Value,
+        long_timeout: bool,
+    ) -> Result<serde_json::Value> {
+        let path = match query {
+            Some(q) => format!("/v1/acp/{server_id}?{q}"),
+            None => format!("/v1/acp/{server_id}"),
+        };
+        let body = JsonRpcRequest::new(method, serde_json::Value::from(id), params);
+        let client = if long_timeout {
+            &self.http_long
+        } else {
+            &self.http
+        };
+        let req = self.apply_auth(client.post(self.url(&path)).json(&body));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed (HTTP): {body}"
+            )));
+        }
+
+        let rpc_raw: serde_json::Value = resp.json().await.map_err(Error::backend_reqwest)?;
+        let rpc_resp: JsonRpcResponse = serde_json::from_value(rpc_raw.clone()).map_err(|e| {
+            Error::BackendMessage(format!(
+                "ACP {method} failed: invalid JSON-RPC response: {e}"
+            ))
+        })?;
+        if let Some(err) = rpc_resp.error {
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed: {} (code {})",
+                err.message, err.code
+            )));
+        }
+        let Some(result_raw) = rpc_raw.get("result") else {
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed: missing JSON-RPC result field"
+            )));
+        };
+        if result_raw.is_null() {
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed: JSON-RPC result was null"
+            )));
+        }
+        let Some(result) = rpc_resp.result else {
+            return Err(Error::BackendMessage(format!(
+                "ACP {method} failed: missing JSON-RPC result field"
+            )));
+        };
+        Ok(result)
+    }
+
+    // -----------------------------------------------------------------------
+    // ACP: Session lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Initialize an ACP server for the given agent.
+    ///
+    /// This must be the first call for a `server_id`. The `agent` query param
+    /// tells sandbox-agent which coding agent to use (codex, claude, opencode).
+    #[tracing::instrument(level = "info", skip(self))]
+    pub async fn acp_initialize(&self, server_id: &str, agent: &str) -> Result<AcpInitResult> {
+        let params = serde_json::json!({
+            "protocolVersion": "1",
+            "clientInfo": {
+                "name": "horizons",
+                "version": env!("CARGO_PKG_VERSION"),
+            }
+        });
+        let query = format!("agent={agent}");
+        let result = self
+            .acp_rpc(server_id, Some(&query), "initialize", 1, params, false)
+            .await?;
+        serde_json::from_value(result.clone()).map_err(|e| {
+            Error::BackendMessage(format!("ACP initialize: bad response: {e}: {result}"))
+        })
+    }
+
+    /// Create a new session inside an ACP server.
+    ///
+    /// Accepts optional config overrides (e.g. `[{"id":"mode","value":"full-access"}]`)
+    /// that are forwarded to the agent so it starts in the desired permission/model mode.
+    #[tracing::instrument(level = "info", skip(self, config_overrides))]
+    pub async fn acp_session_new(
+        &self,
+        server_id: &str,
+        cwd: &str,
+        config_overrides: Option<Vec<serde_json::Value>>,
+    ) -> Result<AcpSessionNewResult> {
+        let mut params = serde_json::json!({
+            "cwd": cwd,
+            "mcpServers": [],
+        });
+        if let Some(overrides) = config_overrides {
+            params["configOverrides"] = serde_json::Value::Array(overrides);
+        }
+        let result = self
+            .acp_rpc(server_id, None, "session/new", 2, params, false)
+            .await?;
+        serde_json::from_value(result.clone()).map_err(|e| {
+            Error::BackendMessage(format!("ACP session/new: bad response: {e}: {result}"))
+        })
+    }
+
+    /// Send a prompt to an ACP session.
+    ///
+    /// **Blocks** until the agent finishes its turn. For long-running prompts,
+    /// use a background task for SSE event reading (permissions, progress).
+    #[tracing::instrument(level = "info", skip(self, prompt))]
+    pub async fn acp_session_prompt(
+        &self,
+        server_id: &str,
+        session_id: &str,
+        prompt: &str,
+    ) -> Result<AcpPromptResult> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [
+                { "type": "text", "text": prompt }
+            ],
+        });
+        let result = self
+            .acp_rpc(server_id, None, "session/prompt", 3, params, true)
+            .await?;
+        serde_json::from_value(result.clone()).map_err(|e| {
+            Error::BackendMessage(format!("ACP session/prompt: bad response: {e}: {result}"))
+        })
+    }
+
+    /// Respond to an ACP server-initiated request (e.g. permission approval).
+    ///
+    /// Sends a JSON-RPC response with the given `id` and `result`.
+    #[tracing::instrument(level = "debug", skip(self, result))]
+    pub async fn acp_respond(
+        &self,
+        server_id: &str,
+        id: serde_json::Value,
+        result: serde_json::Value,
+    ) -> Result<()> {
+        let path = format!("/v1/acp/{server_id}");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        });
+        let req = self.apply_auth(self.http.post(self.url(&path)).json(&body));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(%text, "ACP respond returned non-success");
+        }
+        Ok(())
+    }
+
+    /// Connect to the ACP SSE event stream.
+    ///
+    /// Returns the raw reqwest Response configured for streaming. Caller is
+    /// responsible for reading and parsing SSE frames.
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn acp_sse_connect(&self, server_id: &str) -> Result<reqwest::Response> {
+        let path = format!("/v1/acp/{server_id}");
+        let req = self.apply_auth(
+            self.http_long
+                .get(self.url(&path))
+                .header("Accept", "text/event-stream"),
+        );
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::BackendMessage(format!(
+                "ACP SSE connect failed: {body}"
+            )));
+        }
+        Ok(resp)
+    }
+
+    /// Close an ACP server, terminating all sessions.
+    #[tracing::instrument(level = "info", skip(self))]
+    pub async fn acp_close(&self, server_id: &str) -> Result<()> {
+        let path = format!("/v1/acp/{server_id}");
+        let req = self.apply_auth(self.http.delete(self.url(&path)));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(%body, "ACP close returned non-success (server may already be gone)");
+        }
+        Ok(())
+    }
+
+    /// List active ACP servers.
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn acp_list_servers(&self) -> Result<Vec<AcpServerInfo>> {
+        let req = self.apply_auth(self.http.get(self.url("/v1/acp")));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::BackendMessage(format!(
+                "ACP list servers failed: {body}"
+            )));
+        }
+        let list: AcpServerListResponse = resp.json().await.map_err(Error::backend_reqwest)?;
+        Ok(list.servers)
+    }
+
+    // -----------------------------------------------------------------------
+    // REST API: Session lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Create a new session via the REST API.
+    ///
+    /// `POST /v1/sessions/{session_id}` with the agent type, optional model,
+    /// and optional permission mode.
     #[tracing::instrument(level = "info", skip(self))]
     pub async fn create_session(
         &self,
         session_id: &str,
-        request: &CreateSessionRequest,
+        agent: &str,
+        model: Option<&str>,
+        permission_mode: Option<&str>,
     ) -> Result<CreateSessionResponse> {
-        let init_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "clientCapabilities": {},
-                "clientInfo": { "name": "horizons", "version": "0.1" }
-            }
+        let mut body = serde_json::json!({
+            "agent": agent,
         });
-        let init_resp = self
-            .acp_post(session_id, Some(&request.agent), &init_payload)
-            .await?;
-        if init_resp.get("error").is_some() {
+        if let Some(m) = model {
+            body["model"] = serde_json::Value::String(m.to_string());
+        }
+        if let Some(pm) = permission_mode {
+            body["permissionMode"] = serde_json::Value::String(pm.to_string());
+        }
+        let path = format!("/v1/sessions/{session_id}");
+        let req = self.apply_auth(self.http.post(self.url(&path)).json(&body));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
             return Err(Error::BackendMessage(format!(
-                "sandbox-agent initialize failed: {init_resp}"
+                "create_session failed: {text}"
             )));
         }
-
-        let new_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "session/new",
-            "params": {
-                "cwd": "/",
-                "mcpServers": []
-            }
-        });
-        let new_resp = self.acp_post(session_id, None, &new_payload).await?;
-        if let Some(err) = new_resp.get("error") {
-            return Err(Error::BackendMessage(format!(
-                "sandbox-agent session/new failed: {err}"
-            )));
-        }
-        let acp_session_id = new_resp
-            .get("result")
-            .and_then(|r| r.get("sessionId"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                Error::BackendMessage("sandbox-agent session/new missing sessionId".to_string())
-            })?;
-
-        if let Some(mode) = request.permission_mode.as_deref() {
-            let mode_id = if mode == "bypass" {
-                "full-access"
-            } else {
-                "read-only"
-            };
-            let set_mode = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 20,
-                "method": "session/set_mode",
-                "params": { "sessionId": acp_session_id, "modeId": mode_id }
-            });
-            let _ = self.acp_post(session_id, None, &set_mode).await;
-        }
-        if let Some(model) = request.model.as_deref() {
-            let set_model = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 21,
-                "method": "session/set_model",
-                "params": { "sessionId": acp_session_id, "modelId": model }
-            });
-            let _ = self.acp_post(session_id, None, &set_model).await;
-        }
-
-        let mut state = compat_state().lock().await;
-        state.insert(
-            compat_key(&self.base_url, session_id),
-            CompatSessionState {
-                acp_session_id: Some(acp_session_id.clone()),
-                next_seq: 1,
-                queued_events: Vec::new(),
-            },
-        );
-
-        Ok(CreateSessionResponse {
-            healthy: true,
-            error: None,
-            native_session_id: Some(acp_session_id),
-        })
+        resp.json()
+            .await
+            .map_err(|e| Error::BackendMessage(format!("create_session: bad response: {e}")))
     }
 
-    /// Send a message to an existing session.
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn send_message(&self, session_id: &str, message: &str) -> Result<()> {
-        let acp_session_id = {
-            let state = compat_state().lock().await;
-            state
-                .get(&compat_key(&self.base_url, session_id))
-                .and_then(|s| s.acp_session_id.clone())
-                .ok_or_else(|| {
-                    Error::BackendMessage(format!("unknown ACP session: {session_id}"))
-                })?
-        };
-
-        let prompt_id = 3_u64;
-        let prompt_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": prompt_id,
-            "method": "session/prompt",
-            "params": {
-                "sessionId": acp_session_id,
-                "prompt": [{ "type": "text", "text": message }]
-            }
-        });
-
-        let stream_task = self.acp_collect_until_prompt_done(session_id, prompt_id);
-        let post_task = self.acp_post(session_id, None, &prompt_payload);
-        let (envelopes, post_resp) = tokio::join!(stream_task, post_task);
-        post_resp?;
-        let envelopes = envelopes?;
-
-        let mut assistant_text = String::new();
-        let mut failed_error: Option<String> = None;
-        for env in envelopes {
-            if let Some(update) = env
-                .get("params")
-                .and_then(|v| v.get("update"))
-                .and_then(|v| v.as_object())
-            {
-                if update.get("sessionUpdate").and_then(|v| v.as_str())
-                    == Some("agent_message_chunk")
-                {
-                    if let Some(text) = update
-                        .get("content")
-                        .and_then(|c| c.get("text"))
-                        .and_then(|v| v.as_str())
-                    {
-                        assistant_text.push_str(text);
-                    }
-                }
-            }
-            if env.get("id").and_then(|v| v.as_u64()) == Some(prompt_id) {
-                if let Some(err) = env.get("error") {
-                    failed_error = Some(err.to_string());
-                }
-            }
+    /// Send a message to a session (fire-and-forget).
+    ///
+    /// `POST /v1/sessions/{session_id}/messages` — returns 204 immediately.
+    /// The agent processes the message asynchronously; events arrive on the SSE stream.
+    #[tracing::instrument(level = "info", skip(self, message))]
+    pub async fn post_message(&self, session_id: &str, message: &str) -> Result<()> {
+        let path = format!("/v1/sessions/{session_id}/messages");
+        let body = serde_json::json!({ "message": message });
+        let req = self.apply_auth(self.http_long.post(self.url(&path)).json(&body));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::BackendMessage(format!(
+                "post_message failed: {text}"
+            )));
         }
-
-        let mut state = compat_state().lock().await;
-        if let Some(s) = state.get_mut(&compat_key(&self.base_url, session_id)) {
-            let mut next_seq = s.next_seq.max(1);
-            if !assistant_text.is_empty() {
-                s.queued_events.push(serde_json::json!({
-                    "sequence": next_seq,
-                    "type": "item.completed",
-                    "data": {
-                        "item": {
-                            "role": "assistant",
-                            "content": [{ "type": "text", "text": assistant_text }]
-                        }
-                    }
-                }));
-                next_seq += 1;
-            }
-
-            if let Some(err) = failed_error {
-                s.queued_events.push(serde_json::json!({
-                    "sequence": next_seq,
-                    "type": "turn.ended",
-                    "data": { "metadata": { "status": "failed", "error": { "message": err } } }
-                }));
-                next_seq += 1;
-            } else {
-                s.queued_events.push(serde_json::json!({
-                    "sequence": next_seq,
-                    "type": "turn.ended",
-                    "data": { "metadata": { "status": "completed" } }
-                }));
-                next_seq += 1;
-            }
-            s.next_seq = next_seq;
-        }
-
         Ok(())
     }
 
-    /// Poll for events from a session.
+    /// Connect to the universal events SSE stream.
     ///
-    /// `offset` is the last seen event sequence (exclusive); pass 0 to get all events.
+    /// `GET /v1/sessions/{session_id}/events/sse` — returns a continuous SSE stream
+    /// of `UniversalEvent` objects (not JSON-RPC). The stream stays open until the
+    /// session ends or the connection drops.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn fetch_events(&self, session_id: &str, offset: u64) -> Result<EventsResponse> {
-        let state = compat_state().lock().await;
-        let events = state
-            .get(&compat_key(&self.base_url, session_id))
-            .map(|s| {
-                s.queued_events
-                    .iter()
-                    .filter(|e| e.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0) > offset)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        Ok(EventsResponse {
-            events,
-            has_more: false,
-        })
+    pub async fn events_sse_connect(&self, session_id: &str) -> Result<reqwest::Response> {
+        let path = format!("/v1/sessions/{session_id}/events/sse");
+        let req = self.apply_auth(
+            self.http_long
+                .get(self.url(&path))
+                .header("Accept", "text/event-stream"),
+        );
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::BackendMessage(format!(
+                "events SSE connect failed: {body}"
+            )));
+        }
+        Ok(resp)
     }
 
-    /// Reply to a permission request.
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn reply_permission(
+    /// Reply to a permission request via the REST API.
+    ///
+    /// `POST /v1/sessions/{session_id}/permissions/{permission_id}/reply`
+    /// with `{"reply": "once"|"always"|"reject"}`.
+    #[tracing::instrument(level = "info", skip(self))]
+    pub async fn permission_reply(
         &self,
-        _session_id: &str,
-        _permission_id: &str,
-        _reply: &str,
+        session_id: &str,
+        permission_id: &str,
+        reply: &str,
     ) -> Result<()> {
-        // ACP compatibility path currently uses full-access mode for bypass;
-        // explicit permission reply is not needed for the internal app flow.
+        let path = format!("/v1/sessions/{session_id}/permissions/{permission_id}/reply");
+        let body = serde_json::json!({ "reply": reply });
+        let req = self.apply_auth(self.http.post(self.url(&path)).json(&body));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(%text, %permission_id, "permission_reply returned non-success");
+            return Err(Error::BackendMessage(format!(
+                "permission_reply failed: {text}"
+            )));
+        }
         Ok(())
     }
 
     /// Terminate a session.
+    ///
+    /// `POST /v1/sessions/{session_id}/terminate`
     #[tracing::instrument(level = "info", skip(self))]
     pub async fn terminate_session(&self, session_id: &str) -> Result<()> {
-        let _ = self
-            .apply_auth(self.http.delete(self.url(&format!("/v1/acp/{session_id}"))))
-            .send()
-            .await;
-        let mut state = compat_state().lock().await;
-        state.remove(&compat_key(&self.base_url, session_id));
+        let path = format!("/v1/sessions/{session_id}/terminate");
+        let req = self.apply_auth(self.http.post(self.url(&path)));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(%text, "terminate_session returned non-success");
+        }
         Ok(())
     }
 
-    /// List active sessions.
+    /// Check whether a session has ended via the REST API.
+    ///
+    /// `GET /v1/sessions` → find session by ID.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        let state = compat_state().lock().await;
-        let sessions = state
-            .iter()
-            .filter(|(k, _)| k.starts_with(&self.base_url))
-            .map(|(k, sess)| SessionInfo {
-                session_id: k
-                    .split_once("::")
-                    .map(|(_, sid)| sid.to_string())
-                    .unwrap_or_else(|| k.clone()),
-                agent: "codex".to_string(),
-                ended: false,
-                event_count: sess.queued_events.len() as u64,
-            })
-            .collect::<Vec<_>>();
-        Ok(sessions)
+    pub async fn session_liveness(&self, session_id: &str) -> Result<SessionLiveness> {
+        let req = self.apply_auth(self.http.get(self.url("/v1/sessions")));
+        let resp = req.send().await.map_err(Error::backend_reqwest)?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::BackendMessage(format!(
+                "GET /v1/sessions failed: {text}"
+            )));
+        }
+        let list: SessionListResponse = resp
+            .json()
+            .await
+            .map_err(|e| Error::BackendMessage(format!("GET /v1/sessions: bad response: {e}")))?;
+        Ok(
+            match list
+                .sessions
+                .iter()
+                .find(|s| s.session_id == session_id)
+                .map(|s| s.ended)
+            {
+                Some(true) => SessionLiveness::Ended,
+                Some(false) => SessionLiveness::Active,
+                None => SessionLiveness::Missing,
+            },
+        )
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn is_session_ended(&self, session_id: &str) -> Result<bool> {
+        Ok(matches!(
+            self.session_liveness(session_id).await?,
+            SessionLiveness::Ended
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE frame parser
+// ---------------------------------------------------------------------------
+
+/// Parse a single SSE `data:` payload into a JSON-RPC message.
+pub fn parse_sse_json_rpc(data: &str) -> Option<JsonRpcMessage> {
+    serde_json::from_str(data).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SandboxAgentClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn acp_session_prompt_fails_loud_on_missing_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/acp/s1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SandboxAgentClient::new(server.uri(), None);
+        let err = client
+            .acp_session_prompt("s1", "session-1", "hello")
+            .await
+            .expect_err("missing JSON-RPC result should fail loudly");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("missing JSON-RPC result field"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_session_prompt_fails_loud_on_null_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/acp/s1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": null
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SandboxAgentClient::new(server.uri(), None);
+        let err = client
+            .acp_session_prompt("s1", "session-1", "hello")
+            .await
+            .expect_err("null JSON-RPC result should fail loudly");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("JSON-RPC result was null"),
+            "unexpected error: {msg}"
+        );
     }
 }

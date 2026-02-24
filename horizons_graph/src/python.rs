@@ -10,7 +10,7 @@ use crate::error::{GraphError, Result};
 /// - `python_function` nodes (fn_str + inputs)
 /// - `reduce_fn` reductions (fn_str + results)
 /// - conditional edges (code + state/node_output)
-/// - output-mapping fallbacks (code + state/node_output)
+/// - output-mapping stricts (code + state/node_output)
 ///
 /// By default this runs via a local `python3` subprocess. A Monty backend can
 /// be added behind the `monty` feature.

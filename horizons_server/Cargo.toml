@@ -1,6 +1,6 @@
 [package]
 name = "horizons_server"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license-file = "LICENSE.md"
 
@@ -17,7 +17,7 @@ horizons_core = { path = "../horizons_core", default-features = false }
 horizons_graph = { path = "../horizons_graph", default-features = false, features = ["rlm_v1"] }
 horizons_integrations = { path = "../horizons_integrations", default-features = false, features = ["pgvector"] }
 http = "1.2.0"
-mipro_v2 = { path = "../mipro_v2", optional = true }
+mipro_v2 = { package = "prompt-opt", version = "0.1.3", optional = true }
 redis = { version = "0.27.6", features = ["aio", "tokio-comp", "connection-manager"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.218", features = ["derive"] }
@@ -35,7 +35,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
 ulid = "1.2.1"
 uuid = { version = "1.15.1", features = ["serde", "v4"] }
-voyager = { path = "../voyager", optional = true }
+voyager = { path = "../../rust_backend/voyager", optional = true }
 leptos = { version = "0.6.15", default-features = false, features = ["ssr"] }
 utoipa = "5.4.0"
 

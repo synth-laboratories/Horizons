@@ -174,6 +174,32 @@ impl SandboxBackend for DaytonaBackend {
         let sandbox: SandboxResponse = resp.json().await.map_err(Error::backend_reqwest)?;
         tracing::info!(sandbox_id = %sandbox.id, "daytona sandbox created");
 
+        // Pre-start setup: write auth.json and execute SANDBOX_SETUP_SCRIPT.
+        // Codex CLI `app-server` reads auth from ~/.codex/auth.json, NOT from
+        // the OPENAI_API_KEY env var. Write the file so Codex can authenticate.
+        self.exec_in_sandbox(&sandbox.id, "mkdir -p /root/.codex")
+            .await?;
+
+        if let Some(api_key) = config.env_vars.get("OPENAI_API_KEY") {
+            // API keys are alphanumeric + hyphens/underscores, safe in double-quoted shell.
+            // Use sh -c "..." (double quotes) to avoid the '\'' escaping that breaks
+            // through the Daytona exec API's JSON command field.
+            let auth_cmd = format!(
+                r#"sh -c "printf '%s' '{{\"OPENAI_API_KEY\":\"{}\"}}' > /root/.codex/auth.json""#,
+                api_key
+            );
+            self.exec_in_sandbox(&sandbox.id, &auth_cmd).await?;
+            tracing::info!(sandbox_id = %sandbox.id, "wrote auth.json");
+        }
+
+        // Execute SANDBOX_SETUP_SCRIPT (writes MCP config) — the Daytona
+        // backend has no entrypoint that evals this automatically.
+        if config.env_vars.contains_key("SANDBOX_SETUP_SCRIPT") {
+            let script_cmd = "sh -c 'if [ -n \"$SANDBOX_SETUP_SCRIPT\" ]; then eval \"$SANDBOX_SETUP_SCRIPT\" 2>&1 || echo \"WARNING: SANDBOX_SETUP_SCRIPT failed\"; fi'";
+            self.exec_in_sandbox(&sandbox.id, script_cmd).await?;
+            tracing::info!(sandbox_id = %sandbox.id, "setup script executed");
+        }
+
         // Install sandbox-agent inside the sandbox.
         let agent = config.agent.as_sandbox_agent_str();
         let permission_mode = config.permission_mode.as_str();

@@ -554,7 +554,7 @@ fn try_extract_assignment_lhs_names(line: &str) -> Option<Vec<String>> {
         return Some(vec![name.to_string()]);
     }
 
-    // Fallback: destructuring `a, b = ...`
+    // Strict: destructuring `a, b = ...`
     let eq = line.find('=')?;
     // Reject comparisons like `==`, `!=`, `<=`, `>=`, `:=`
     let after = &line[eq..];

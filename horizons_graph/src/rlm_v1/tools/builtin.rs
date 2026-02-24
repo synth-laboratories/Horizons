@@ -111,6 +111,52 @@ pub fn builtin_tools() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "query_run_logs",
+                "description": "Query VictoriaLogs for a specific run/task/component scope.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {
+                            "type": "string",
+                            "description": "Optional run or task run identifier to scope logs."
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": "Optional project identifier to scope logs."
+                        },
+                        "task_key": {
+                            "type": "string",
+                            "description": "Optional task identifier to scope logs."
+                        },
+                        "component": {
+                            "type": "string",
+                            "description": "Optional component filter (orchestrator|worker|sandbox-daemon...)."
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Optional VictoriaLogs query override."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200
+                        },
+                        "start": {
+                            "type": "string",
+                            "description": "Optional start timestamp (RFC3339 or unix ns)."
+                        },
+                        "end": {
+                            "type": "string",
+                            "description": "Optional end timestamp (RFC3339 or unix ns)."
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "query_lm",
                 "description": "Ask a sub-question to another LLM.",
                 "parameters": {

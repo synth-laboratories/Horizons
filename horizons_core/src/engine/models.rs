@@ -84,13 +84,33 @@ pub struct SandboxConfig {
     pub env_vars: HashMap<String, String>,
     /// Maximum seconds the agent session may run before timeout.
     pub timeout_seconds: u64,
+    /// Maximum seconds without any observed progress before failing fast.
+    ///
+    /// Progress is defined as receiving at least one SSE event from sandbox-agent.
+    /// This guards against silent hangs where the session never reaches a terminal
+    /// event but also makes no forward progress.
+    #[serde(default = "default_no_progress_timeout_seconds")]
+    pub no_progress_timeout_seconds: u64,
     /// Working directory inside the container where task files reside.
     pub workdir: Option<String>,
+
+    /// Mount the host Docker socket into the container so the agent can run
+    /// Docker commands (build, compose, etc.) via the host daemon.
+    #[serde(default)]
+    pub docker_socket: bool,
 
     /// Optional restart policy for long-running sandboxes started via `start_agent_tracked`.
     /// One-shot runs (`run_agent`) do not use this.
     #[serde(default)]
     pub restart_policy: Option<RestartPolicy>,
+
+    /// Optional structured tags for correlating sandbox session events in external sinks
+    /// (e.g. `run_id`, `project_id`, `task_key`, etc).
+    ///
+    /// These are NOT injected into the container environment; they are only used by the
+    /// host-side runtime when teeing universal events to sinks like VictoriaLogs.
+    #[serde(default)]
+    pub log_tags: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,10 +130,17 @@ impl Default for SandboxConfig {
             image: None,
             env_vars: HashMap::new(),
             timeout_seconds: 1800,
+            no_progress_timeout_seconds: default_no_progress_timeout_seconds(),
             workdir: None,
+            docker_socket: false,
             restart_policy: None,
+            log_tags: HashMap::new(),
         }
     }
+}
+
+fn default_no_progress_timeout_seconds() -> u64 {
+    180
 }
 
 /// Opaque handle to a provisioned sandbox.

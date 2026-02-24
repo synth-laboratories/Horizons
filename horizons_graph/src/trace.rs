@@ -15,7 +15,7 @@ pub const TRACE_SCHEMA_VERSION: &str = "v4";
 /// Root trace object returned with every graph execution
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecutionTrace {
-    /// Schema version for backwards compatibility
+    /// Schema version for compatibility removed
     pub schema_version: String,
     /// Total execution time in milliseconds
     pub total_elapsed_ms: i64,

@@ -129,7 +129,7 @@ impl SandboxHealthMonitor {
                     }
 
                     match self.runtime.restart_run(&run.run_id).await {
-                        Ok(updated) => {
+                        Ok((updated, _channels)) => {
                             restarted = true;
                             let ev = Event::new(
                                 updated.org_id.clone(),

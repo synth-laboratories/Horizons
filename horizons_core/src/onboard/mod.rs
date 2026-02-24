@@ -1,5 +1,4 @@
 pub mod config;
-pub mod helix_client;
 pub mod models;
 pub mod postgres;
 pub mod postgres_project_db;
@@ -9,4 +8,5 @@ pub mod secrets;
 pub mod sqlite;
 pub mod sqlite_project_db;
 pub mod traits;
+#[cfg(feature = "turso")]
 pub mod turso;

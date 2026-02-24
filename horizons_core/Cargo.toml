@@ -1,6 +1,6 @@
 [package]
 name = "horizons_core"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license-file = "LICENSE.md"
 
@@ -17,7 +17,7 @@ hmac = "0.12"
 aws-config = { version = "1.8.12", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
 aws-credential-types = "1.2.11"
 aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
-libsql = { version = "0.5.0", features = ["serde"] }
+libsql = { version = "0.5.0", features = ["serde"], optional = true }
 redis = { version = "0.27.6", features = ["aio", "tokio-comp", "connection-manager"] }
 # `bytes_stream()` is gated behind reqwest's `stream` feature.
 reqwest = { version = "0.11.27", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -27,7 +27,7 @@ serde_json = "1.0.139"
 sha2 = "0.10"
 sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "sqlite", "uuid"] }
 thiserror = "2.0.11"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 tokio-stream = "0.1.17"
 tokio-util = "0.7"
 tracing = "0.1.41"
@@ -41,12 +41,13 @@ rand = "0.8"
 regex = "1"
 cron = "0.15"
 sandbox-agent-universal-agent-schema = { git = "https://github.com/rivet-dev/sandbox-agent", rev = "8a31519" }
-voyager = { path = "../voyager", optional = true }
-mipro_v2 = { path = "../mipro_v2", optional = true }
+voyager = { path = "../../rust_backend/voyager", optional = true }
+mipro_v2 = { package = "prompt-opt", version = "0.1.3", optional = true }
 rlm = { package = "rlm-rs", path = "../rlm", optional = true }
 
 [features]
 default = []
+turso = ["dep:libsql", "sqlx/sqlite"]
 memory = ["dep:voyager"]
 optimization = ["dep:mipro_v2"]
 evaluation = ["dep:rlm"]
