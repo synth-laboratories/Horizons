@@ -39,6 +39,13 @@ impl Optimizer {
         dataset: Dataset,
     ) -> Result<OptimizationResult> {
         cfg.validate()?;
+        let allow_plateau_move = std::env::var("MIPRO_ALLOW_PLATEAU_MOVE")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
         let (train, holdout) = dataset.split_train_holdout(cfg.holdout_ratio, cfg.seed)?;
         let _ = train; // reserved for future use (e.g., sampler conditioning). Still split for determinism.
 
@@ -81,8 +88,16 @@ impl Optimizer {
                 .map(|(c, s)| (*c, *s))
                 .ok_or_else(|| MiproError::Unexpected("no scored candidates".to_string()))?;
 
-            let improved = best_cand_score > best_score + cfg.min_improvement;
-            if improved {
+            let score_delta = best_cand_score - best_score;
+            let strictly_improved = score_delta > cfg.min_improvement;
+            // Optional plateau exploration: on sparse/noisy reward surfaces, candidates often tie.
+            // Allow moving across ties (same score within tolerance) so later iterations can escape.
+            let plateau_move = allow_plateau_move
+                && !strictly_improved
+                && score_delta.abs() <= cfg.min_improvement
+                && best_cand.policy.template != best_policy.template;
+            let accepted = strictly_improved || plateau_move;
+            if accepted {
                 best_score = best_cand_score;
                 best_policy = best_cand.policy.clone();
                 no_improve_rounds = 0;
@@ -95,7 +110,7 @@ impl Optimizer {
                 candidate_scores: scored.iter().map(|(c, s)| (c.id, *s)).collect(),
                 best_candidate: best_cand.id,
                 best_score: best_cand_score,
-                improved,
+                improved: strictly_improved,
             });
 
             result.best_score = best_score;

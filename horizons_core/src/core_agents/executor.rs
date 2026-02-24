@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS horizons_action_proposals (
   review_mode TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   context_json TEXT NOT NULL,
+  cost_estimate_json TEXT NULL,
   dedupe_key TEXT NULL,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -107,7 +108,7 @@ impl CoreAgentsExecutor {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn ensure_schema(&self, org_id: OrgId, handle: &ProjectDbHandle) -> Result<()> {
         ensure_handle_org(handle, org_id)?;
-        let key = format!("{}:{}", org_id.to_string(), handle.project_id.to_string());
+        let key = format!("{org_id}:{}", handle.project_id);
         {
             let ensured = self.ensured_action_schema.lock().await;
             if ensured.contains(&key) {
@@ -128,7 +129,50 @@ impl CoreAgentsExecutor {
         {
             self.project_db.execute(org_id, handle, stmt, &[]).await?;
         }
+
+        // Best-effort column migration for older project DBs.
+        self.ensure_action_columns(org_id, handle).await?;
+
         ensured.insert(key);
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn ensure_action_columns(&self, org_id: OrgId, handle: &ProjectDbHandle) -> Result<()> {
+        // SQLite does not support `ADD COLUMN IF NOT EXISTS`, so we must detect manually.
+        // Postgres can do `ADD COLUMN IF NOT EXISTS`, but we keep one flow by probing columns.
+        let column_probe_sql = if handle.connection_url.starts_with("postgres://")
+            || handle.connection_url.starts_with("postgresql://")
+        {
+            "SELECT column_name AS name
+               FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'horizons_action_proposals'"
+        } else {
+            "PRAGMA table_info(horizons_action_proposals)"
+        };
+        let rows = self
+            .project_db
+            .query(org_id, handle, column_probe_sql, &[])
+            .await?;
+        let mut has_cost_estimate = false;
+        for r in rows {
+            if let Some(ProjectDbValue::String(name)) = r.get("name") {
+                if name == "cost_estimate_json" {
+                    has_cost_estimate = true;
+                }
+            }
+        }
+        if !has_cost_estimate {
+            self.project_db
+                .execute(
+                    org_id,
+                    handle,
+                    "ALTER TABLE horizons_action_proposals ADD COLUMN cost_estimate_json TEXT NULL",
+                    &[],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -155,12 +199,12 @@ impl CoreAgentsExecutor {
         let sql = r#"
 INSERT INTO horizons_action_proposals
   (id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
-   payload_json, context_json, dedupe_key, status, created_at, expires_at,
+   payload_json, context_json, cost_estimate_json, dedupe_key, status, created_at, expires_at,
    decided_at, decided_by, decision_reason, execution_result_json)
 VALUES
   (?1, ?2, ?3, ?4, ?5, ?6, ?7,
    ?8, ?9, ?10, ?11, ?12, ?13,
-   ?14, ?15, ?16, ?17)
+   ?14, ?15, ?16, ?17, ?18)
 ON CONFLICT(org_id, dedupe_key) DO NOTHING
 "#;
 
@@ -168,6 +212,12 @@ ON CONFLICT(org_id, dedupe_key) DO NOTHING
             .map_err(|e| Error::backend("serialize action payload", e))?;
         let context_json = serde_json::to_string(&proposal_to_insert.context)
             .map_err(|e| Error::backend("serialize action context", e))?;
+        let cost_estimate_json = proposal_to_insert
+            .cost_estimate
+            .as_ref()
+            .map(|v| serde_json::to_string(v))
+            .transpose()
+            .map_err(|e| Error::backend("serialize cost estimate", e))?;
         let execution_json = proposal_to_insert
             .execution_result
             .as_ref()
@@ -185,6 +235,9 @@ ON CONFLICT(org_id, dedupe_key) DO NOTHING
             ProjectDbParam::String(mode_to_str(review_mode).to_string()),
             ProjectDbParam::String(payload_json),
             ProjectDbParam::String(context_json),
+            cost_estimate_json
+                .map(ProjectDbParam::String)
+                .unwrap_or(ProjectDbParam::Null),
             ProjectDbParam::String(dedupe_key.clone()),
             ProjectDbParam::String(status_to_str(proposal_to_insert.status).to_string()),
             ProjectDbParam::String(proposal_to_insert.created_at.to_rfc3339()),
@@ -283,13 +336,13 @@ UPDATE horizons_action_proposals
     ) -> Result<Option<(ActionProposal, ReviewMode)>> {
         self.ensure_schema(org_id, handle).await?;
         let sql = r#"
-SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
-       payload_json, context_json, dedupe_key, status, created_at, expires_at,
-       decided_at, decided_by, decision_reason, execution_result_json
-  FROM horizons_action_proposals
- WHERE org_id = ?1 AND id = ?2
- LIMIT 1
-"#;
+	SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
+	       payload_json, context_json, cost_estimate_json, dedupe_key, status, created_at, expires_at,
+	       decided_at, decided_by, decision_reason, execution_result_json
+	  FROM horizons_action_proposals
+	 WHERE org_id = ?1 AND id = ?2
+	 LIMIT 1
+	"#;
         let params = vec![
             ProjectDbParam::String(org_id.to_string()),
             ProjectDbParam::String(action_id.to_string()),
@@ -313,13 +366,13 @@ SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
     ) -> Result<Option<(ActionProposal, ReviewMode)>> {
         self.ensure_schema(org_id, handle).await?;
         let sql = r#"
-SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
-       payload_json, context_json, dedupe_key, status, created_at, expires_at,
-       decided_at, decided_by, decision_reason, execution_result_json
-  FROM horizons_action_proposals
- WHERE org_id = ?1 AND dedupe_key = ?2
- LIMIT 1
-"#;
+	SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
+	       payload_json, context_json, cost_estimate_json, dedupe_key, status, created_at, expires_at,
+	       decided_at, decided_by, decision_reason, execution_result_json
+	  FROM horizons_action_proposals
+	 WHERE org_id = ?1 AND dedupe_key = ?2
+	 LIMIT 1
+	"#;
         let params = vec![
             ProjectDbParam::String(org_id.to_string()),
             ProjectDbParam::String(dedupe_key.to_string()),
@@ -351,6 +404,7 @@ SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
             "status": status,
             "reason": reason,
             "payload": p.payload,
+            "cost_estimate": p.cost_estimate,
             "context": p.context,
         });
 
@@ -564,6 +618,7 @@ impl CoreAgents for CoreAgentsExecutor {
             identity: identity.clone(),
             project_db: project_db.clone(),
             db: self.project_db.clone(),
+            event_bus: self.event_bus.clone(),
             credentials,
         };
 
@@ -877,11 +932,11 @@ impl CoreAgents for CoreAgentsExecutor {
         self.ensure_schema(org_id, project_db).await?;
 
         let sql = r#"
-SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
-       payload_json, context_json, dedupe_key, status, created_at, expires_at,
-       decided_at, decided_by, decision_reason, execution_result_json
-  FROM horizons_action_proposals
- WHERE org_id = ?1 AND project_id = ?2 AND status = 'proposed'
+	SELECT id, org_id, project_id, agent_id, action_type, risk_level, review_mode,
+	       payload_json, context_json, cost_estimate_json, dedupe_key, status, created_at, expires_at,
+	       decided_at, decided_by, decision_reason, execution_result_json
+	  FROM horizons_action_proposals
+	 WHERE org_id = ?1 AND project_id = ?2 AND status = 'proposed'
  ORDER BY created_at ASC
  LIMIT ?3 OFFSET ?4
 "#;
@@ -1012,6 +1067,15 @@ fn action_from_row(row: &ProjectDbRow) -> Result<ActionProposal> {
     let context: serde_json::Value = serde_json::from_str(&context_json)
         .map_err(|e| Error::backend("deserialize context_json", e))?;
 
+    let cost_estimate = match get_opt_string(row, "cost_estimate_json")? {
+        Some(s) => {
+            let v: crate::core_agents::models::CostEstimate = serde_json::from_str(&s)
+                .map_err(|e| Error::backend("deserialize cost_estimate", e))?;
+            Some(v)
+        }
+        None => None,
+    };
+
     let created_at = parse_dt(&get_string(row, "created_at")?, "created_at")?;
     let expires_at = parse_dt(&get_string(row, "expires_at")?, "expires_at")?;
 
@@ -1037,6 +1101,7 @@ fn action_from_row(row: &ProjectDbRow) -> Result<ActionProposal> {
         action_type,
         payload,
         risk_level: risk,
+        cost_estimate,
         dedupe_key,
         context,
         status,

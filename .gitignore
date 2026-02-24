@@ -42,3 +42,4 @@ Thumbs.db
 
 # Local dev state
 /.horizons_dev_admin_test/
+/.horizons_dev/

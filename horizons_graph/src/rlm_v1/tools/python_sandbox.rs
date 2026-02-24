@@ -336,6 +336,44 @@ fn build_monty_inputs(
 }
 
 fn build_full_code(tracked_vars: &[String], reserved: &HashSet<String>, user_code: &str) -> String {
+    // Prelude: provide a small shim so common LLM patterns keep working in the Monty sandbox.
+    //
+    // Monty doesn't have filesystem access, but RLM users often write:
+    //   with open("context.txt") as f: ...
+    // We expose materialized inputs as the `files` dict (filename -> content). This shim
+    // makes `open(<materialized filename>)` work by reading from `files` instead.
+    //
+    // If you need the default context, use the `context` variable directly.
+    let prelude = r#"
+# --- Monty sandbox helpers (no filesystem/network) ---
+class _VirtualFile:
+    def __init__(self, text):
+        self._text = text if text is not None else ""
+        self._lines = None
+    def read(self):
+        return self._text
+    def readlines(self):
+        if self._lines is None:
+            self._lines = self._text.splitlines(True)
+        return list(self._lines)
+    def __iter__(self):
+        return iter(self.readlines())
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+def open(name, mode="r", *args, **kwargs):
+    # Best-effort: support reading a materialized file via `files`.
+    if isinstance(mode, str) and ("w" in mode or "a" in mode or "+" in mode or "b" in mode):
+        raise Exception("open() supports read-text only in Monty sandbox")
+    if isinstance(name, str) and "files" in globals() and name in files:
+        return _VirtualFile(files[name])
+    raise Exception("open() supports only materialized files; use files[filename] or context")
+# --- end helpers ---
+
+"#;
+
     // Epilogue: persist a selected set of names.
     //
     // Monty doesn't implement `locals()`/`globals()`, so we can't introspect variable names.
@@ -367,6 +405,7 @@ fn build_full_code(tracked_vars: &[String], reserved: &HashSet<String>, user_cod
     epilogue.push_str("__vars__\n");
 
     let mut full = String::new();
+    full.push_str(prelude);
     full.push_str(user_code);
     full.push('\n');
     full.push_str(&epilogue);

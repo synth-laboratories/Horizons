@@ -15,7 +15,7 @@ Agents ────►             │  │                      │  │       
   ┌───────────────────────────────────────────────────────────────────────┐    ACLs
   │             Evaluation, Optimization, and Continual Learning         │
   │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐               │    designed
-  │  │  RLM v1 (OSS)│  │  MIPRO v2    │  │  GEPA        │               │    for
+  │  │RLM v1 (open source)│ MIPRO v2   │  │  GEPA        │               │    for
   │  │  reward       │  │  batch prompt│  │  reflective  │               │    governed
   │  │  scoring      │  │  optimization│  │  evolution   │               │    and
   │  └──────────────┘  └──────────────┘  └──────────────┘               │    regulated

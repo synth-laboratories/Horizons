@@ -128,7 +128,16 @@ fn parse_mcp_transport(v: &serde_json::Value) -> anyhow::Result<McpTransport> {
                             .collect::<HashMap<String, String>>()
                     })
                     .unwrap_or_default();
-                return Ok(McpTransport::Http { url, headers });
+                let call_path = obj
+                    .get("call_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/call")
+                    .to_string();
+                return Ok(McpTransport::Http {
+                    url,
+                    headers,
+                    call_path,
+                });
             }
             other => return Err(anyhow::anyhow!("unknown mcp transport type: {other}")),
         }

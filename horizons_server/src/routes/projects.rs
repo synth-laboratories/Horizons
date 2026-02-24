@@ -6,8 +6,8 @@ use axum::Json;
 use axum::extract::Query;
 use axum::http::HeaderMap;
 use axum::routing::post;
-use horizons_core::models::{ProjectDbHandle, ProjectId};
 use horizons_core::models::OrgId;
+use horizons_core::models::{ProjectDbHandle, ProjectId};
 use horizons_core::onboard::traits::{ListQuery, ProjectRecord};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -69,7 +69,10 @@ fn admin_token_ok(headers: &HeaderMap) -> bool {
     if let Some(got) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
         .map(|s| s.trim())
     {
         return got == expected;

@@ -6,8 +6,8 @@ use axum::Json;
 use axum::routing::post;
 use horizons_core::models::{OrgId, ProjectId};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct TickRequest {
@@ -70,7 +70,7 @@ pub async fn tick(
         (None, None) => {
             return Err(ApiError::InvalidInput(
                 "project_id (or project) is required".to_string(),
-            ))
+            ));
         }
     };
     let max_runs_per_tick = req.max_runs_per_tick.unwrap_or(1);
