@@ -646,7 +646,7 @@ impl SandboxRuntime {
                         return;
                     }
                     Err(_timeout) => {
-                        // SSE idle timeout — check session status via REST fallback.
+                        // SSE idle timeout — check session status via REST strict.
                         tracing::info!(
                             "SSE idle timeout after 120s, checking session status via REST"
                         );

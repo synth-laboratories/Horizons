@@ -152,7 +152,7 @@ class ActionStatus(str, Enum):
     approved = "approved"
     denied = "denied"
     dispatched = "dispatched"
-    # Legacy name (server previously returned "executed" for "dispatched").
+    # Canonical name (server previously returned "executed" for "dispatched").
     executed = "executed"
     expired = "expired"
 

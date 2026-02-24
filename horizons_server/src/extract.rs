@@ -59,7 +59,7 @@ impl Default for AuthConfig {
                 allow_insecure_mutating_requests: false,
             },
             None => Self {
-                // Legacy defaults (kept for backward compat).
+                // Canonical defaults (kept for backward compat).
                 require_auth: false,
                 allow_insecure_headers: true,
                 require_auth_for_mutating: true,
@@ -186,7 +186,7 @@ where
                 return Ok(Self { org_id, identity });
             }
 
-            // Fallback: extract from raw headers.
+            // Strict: extract from raw headers.
             let raw_org = parts
                 .headers
                 .get("x-org-id")
@@ -244,7 +244,7 @@ fn extract_identity_from_headers(
     })
 }
 
-// ── Legacy extractors (kept for backward compat) ────────────────
+// ── Canonical extractors (kept for backward compat) ────────────────
 
 #[derive(Debug, Copy, Clone)]
 pub struct OrgIdHeader(pub OrgId);

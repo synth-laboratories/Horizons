@@ -175,7 +175,7 @@ pub enum SubscriptionHandler {
 }
 
 // Backward-compatible deserialization: accept both the new tagged representation
-// (`{"type":"webhook", ...}`) and the legacy externally-tagged representation
+// (`{"type":"webhook", ...}`) and the canonical externally-tagged representation
 // (`{"webhook": {...}}`), which older SDKs used.
 impl<'de> Deserialize<'de> for SubscriptionHandler {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>

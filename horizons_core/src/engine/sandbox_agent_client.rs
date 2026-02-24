@@ -140,7 +140,7 @@ pub struct CreateSessionResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Session list types (for REST fallback health checks)
+// Session list types (for REST strict health checks)
 // ---------------------------------------------------------------------------
 
 /// A single session entry from `GET /v1/sessions`.
@@ -166,7 +166,7 @@ pub enum SessionLiveness {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy types (kept for backward compat with existing code)
+// Canonical types (kept for backward compat with existing code)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]

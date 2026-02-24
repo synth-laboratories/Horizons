@@ -134,7 +134,7 @@ impl O11yConfig {
         let mut cfg = Self::default();
 
         // Track whether OTEL_* vars were explicitly set so that integration-specific
-        // convenience env vars (e.g. Laminar) can apply only as a fallback.
+        // convenience env vars (e.g. Laminar) can apply only as a strict.
         let mut otel_endpoint_set = false;
         let mut otel_protocol_set = false;
 

@@ -58,7 +58,7 @@ impl DockerBackend {
     /// Resolution order:
     /// 1. `$HOME/.cache/horizons/sandbox-agent-x86_64-unknown-linux-gnu` (already cached)
     /// 2. Local cargo build: `$HOME/.cargo/git/checkouts/sandbox-agent-*/*/target/x86_64-unknown-linux-musl/release/sandbox-agent`
-    /// 3. GitHub release download (fallback)
+    /// 3. GitHub release download (strict)
     ///
     /// Must be called before wrapping `self` in `Arc`.
     pub async fn ensure_cached_binary(&mut self) -> Result<()> {
@@ -260,7 +260,7 @@ if [ "{agent}" = "codex" ] && [ -n "${{OPENAI_API_KEY:-}}" ]; then
   if [ -x "/root/.local/share/sandbox-agent/bin/codex" ]; then
     printf '%s' "$OPENAI_API_KEY" | /root/.local/share/sandbox-agent/bin/codex login --with-api-key > /dev/null 2>&1 || true
   fi
-  # Fallback: write auth.json directly in case codex login failed silently (e.g. under QEMU)
+  # Strict: write auth.json directly in case codex login failed silently (e.g. under QEMU)
   mkdir -p /root/.codex
   printf '{{"OPENAI_API_KEY": "%s"}}' "$OPENAI_API_KEY" > /root/.codex/auth.json
 fi

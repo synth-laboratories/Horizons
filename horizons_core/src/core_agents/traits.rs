@@ -25,20 +25,20 @@ pub trait AgentSpec: Send + Sync {
     ///   DB writes or external calls and don't need the approval pipeline.
     /// - `AgentOutcome::Mixed { result, proposals }` — both.
     ///
-    /// For backward compatibility, the default implementation wraps the legacy
-    /// `run_legacy` method that returns `Vec<ActionProposal>`.
+    /// For compatibility removed, the default implementation wraps the canonical
+    /// `run_canonical` method that returns `Vec<ActionProposal>`.
     async fn run(
         &self,
         ctx: AgentContext,
         inputs: Option<serde_json::Value>,
     ) -> Result<AgentOutcome> {
-        let proposals = self.run_legacy(ctx, inputs).await?;
+        let proposals = self.run_canonical(ctx, inputs).await?;
         Ok(AgentOutcome::Proposals(proposals))
     }
 
-    /// Legacy entrypoint for agents that only return proposals.
+    /// Canonical entrypoint for agents that only return proposals.
     /// Override `run` directly for new agents; this exists only for backward compat.
-    async fn run_legacy(
+    async fn run_canonical(
         &self,
         _ctx: AgentContext,
         _inputs: Option<serde_json::Value>,

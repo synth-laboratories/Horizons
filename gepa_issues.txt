@@ -32,7 +32,7 @@ Needed change:
 - Require one of:
   - Valid bearer auth mapped to org, or
   - Valid webhook signature (HMAC) with mandatory secret in production.
-- Remove/disable unauthenticated org header fallback for inbound webhook paths.
+- Remove/disable unauthenticated org header strict for inbound webhook paths.
 
 3) Release pipeline does not guarantee deployable container images for chart references (Critical)
 Why it matters:
@@ -63,7 +63,7 @@ P1 (High Priority Pre-Launch)
 
 5) Branching and test promotion model mismatch with controller repo (High)
 Why it matters:
-- Integration gates may run against wrong branch fallback, reducing confidence in release promotion.
+- Integration gates may run against wrong branch strict, reducing confidence in release promotion.
 Evidence:
 - docs/BRANCHING.md (dev->nightly->main)
 - testing repo conventions (dev->staging->main)
@@ -241,7 +241,7 @@ P0 items implemented in this workspace:
 - Org-level authz enforcement for handle-scoped engine routes:
   - horizons_server/src/routes/engine.rs
 - Inbound webhook hardening: require Bearer auth OR (when configured) signature-verified body + explicit org_id;
-  unauthenticated `x-org-id` fallback is now restricted to `HORIZONS_AUTH_MODE=dev_insecure`.
+  unauthenticated `x-org-id` strict is now restricted to `HORIZONS_AUTH_MODE=dev_insecure`.
   - horizons_server/src/routes/events.rs
 - Release workflow now builds and pushes multi-arch GHCR images tagged with both `vX.Y.Z` and `X.Y.Z` plus provenance/SBOM:
   - .github/workflows/release.yml

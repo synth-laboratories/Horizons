@@ -155,7 +155,7 @@ impl LlmClient {
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(event) = next_sse_event(&mut buffer) {
                     if event == "[DONE]" {
-                        fill_usage_fallback(&request.model, &request.messages, &text, &mut usage);
+                        fill_usage_strict(&request.model, &request.messages, &text, &mut usage);
                         return Ok(LlmResponse {
                             text,
                             usage,
@@ -187,7 +187,7 @@ impl LlmClient {
                 .map_err(|err| GraphError::internal(format!("llm response parse failed: {err}")))?;
             let text = extract_chat_message(&value).unwrap_or_default();
             let mut usage = extract_usage(&value).unwrap_or_default();
-            fill_usage_fallback(&request.model, &request.messages, &text, &mut usage);
+            fill_usage_strict(&request.model, &request.messages, &text, &mut usage);
             Ok(LlmResponse {
                 text,
                 usage,
@@ -263,7 +263,7 @@ impl LlmClient {
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(event) = next_sse_event(&mut buffer) {
                     if event == "[DONE]" {
-                        fill_usage_fallback(&request.model, &request.messages, &text, &mut usage);
+                        fill_usage_strict(&request.model, &request.messages, &text, &mut usage);
                         return Ok(LlmResponse {
                             text,
                             usage,
@@ -295,7 +295,7 @@ impl LlmClient {
                 .map_err(|err| GraphError::internal(format!("llm response parse failed: {err}")))?;
             let text = extract_response_text(&value).unwrap_or_default();
             let mut usage = extract_usage(&value).unwrap_or_default();
-            fill_usage_fallback(&request.model, &request.messages, &text, &mut usage);
+            fill_usage_strict(&request.model, &request.messages, &text, &mut usage);
             Ok(LlmResponse {
                 text,
                 usage,
@@ -516,7 +516,7 @@ fn extract_usage(value: &Value) -> Option<UsageSummary> {
     })
 }
 
-fn fill_usage_fallback(
+fn fill_usage_strict(
     model: &str,
     messages: &[Value],
     response_text: &str,
